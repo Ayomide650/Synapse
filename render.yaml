@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: synapse-bot
+    env: node
+    buildCommand: npm ci
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: SERVER_LOG_CHANNEL
+        sync: false
+      - key: XP_LOGS_CHANNEL
+        sync: false
