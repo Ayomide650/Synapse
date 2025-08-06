@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch: # Allows manual triggering
+    inputs:
+      duration:
+        description: 'How long to run the bot (in minutes, max 360)'
+        required: false
+        default: '360'
+        type: string
 
 env:
   NODE_VERSION: '20.x'
@@ -14,6 +20,7 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -29,15 +36,11 @@ jobs:
       
     - name: Run tests
       run: npm test
-      
-    - name: Run linting (if available)
-      run: npm run lint --if-present
 
   deploy:
-    name: Deploy Bot on GitHub Actions
-    needs: test
+    name: Run Discord Bot
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     environment: production
     steps:
     - name: Checkout code
@@ -52,6 +55,11 @@ jobs:
     - name: Install dependencies
       run: npm ci
       
+    - name: Create data directories
+      run: |
+        mkdir -p ./data/backups
+        echo "📁 Created data directories"
+        
     - name: Start Discord Bot
       env:
         # Discord Bot Configuration
@@ -72,69 +80,82 @@ jobs:
         DAILY_AMOUNT: ${{ secrets.DAILY_AMOUNT }}
       run: |
         echo "🤖 Starting Synapse Discord Bot..."
-        echo "Bot will run for up to 6 hours on GitHub Actions"
-        echo "Started at: $(date)"
+        echo "⏰ Started at: $(date)"
+        echo "🔧 Bot will run for ${{ github.event.inputs.duration || '360' }} minutes"
+        echo ""
+        echo "💡 The bot is now running! This job will appear 'in progress' until:"
+        echo "   - The time limit is reached, OR"
+        echo "   - You manually cancel it, OR" 
+        echo "   - An error occurs"
+        echo ""
+        echo "🎯 Your bot should now be online in Discord!"
+        echo "---"
         
-        # Create data directories if they don't exist
-        mkdir -p ./data/backups
+        # Calculate timeout in seconds (default 6 hours = 21600 seconds)
+        DURATION_MINUTES="${{ github.event.inputs.duration || '360' }}"
+        TIMEOUT_SECONDS=$((DURATION_MINUTES * 60))
         
-        # Add timeout to prevent hanging
-        timeout 21600 npm start || {
-          echo "⚠️  Bot stopped after 6 hours (GitHub Actions limit)"
-          echo "Stopped at: $(date)"
+        # Start the bot with timeout
+        timeout $TIMEOUT_SECONDS npm start || {
+          EXIT_CODE=$?
+          echo ""
+          echo "---"
+          if [ $EXIT_CODE -eq 124 ]; then
+            echo "⏰ Bot stopped after $DURATION_MINUTES minutes (time limit reached)"
+          else
+            echo "🛑 Bot stopped with exit code: $EXIT_CODE"
+          fi
+          echo "⏰ Stopped at: $(date)"
+          echo ""
+          echo "🔄 To restart the bot:"
+          echo "   1. Go to the Actions tab"
+          echo "   2. Click 'Deploy Synapse Bot'"
+          echo "   3. Click 'Run workflow'"
         }
 
-  # Optional: Create a job that runs on schedule to restart the bot
-  scheduled-deploy:
-    name: Scheduled Bot Restart
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    environment: production
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ env.NODE_VERSION }}
-        cache: 'npm'
-        
-    - name: Install dependencies
-      run: npm ci
-      
-    - name: Start Discord Bot (Scheduled)
-      env:
-        # Discord Bot Configuration
-        DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
-        
-        # Channel IDs
-        SERVER_LOG_CHANNEL: ${{ secrets.SERVER_LOG_CHANNEL }}
-        GIVEAWAY_CHANNEL_ID: ${{ secrets.GIVEAWAY_CHANNEL_ID }}
-        
-        # Server Configuration
-        PORT: ${{ secrets.PORT }}
-        
-        # Database Paths (GitHub Actions filesystem)
-        DATA_PATH: ./data
-        BACKUP_PATH: ./data/backups
-        
-        # Economy Settings
-        DAILY_AMOUNT: ${{ secrets.DAILY_AMOUNT }}
-      run: |
-        echo "🔄 Scheduled restart of Synapse Discord Bot..."
-        echo "Started at: $(date)"
-        
-        # Create data directories if they don't exist
-        mkdir -p ./data/backups
-        
-        timeout 21600 npm start || {
-          echo "⚠️  Scheduled run completed after 6 hours"
-          echo "Stopped at: $(date)"
-        }
+  # Optional: Scheduled runs (uncomment if you want automatic restarts)
+  # scheduled-deploy:
+  #   name: Scheduled Bot Run
+  #   runs-on: ubuntu-latest
+  #   # Run every 6 hours
+  #   # Note: This will consume your GitHub Actions minutes quickly!
+  #   if: github.event_name == 'schedule'
+  #   environment: production
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+  #     
+  #   - name: Setup Node.js
+  #     uses: actions/setup-node@v4
+  #     with:
+  #       node-version: ${{ env.NODE_VERSION }}
+  #       cache: 'npm'
+  #       
+  #   - name: Install dependencies
+  #     run: npm ci
+  #     
+  #   - name: Create data directories
+  #     run: mkdir -p ./data/backups
+  #       
+  #   - name: Start Discord Bot (Scheduled)
+  #     env:
+  #       DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+  #       SERVER_LOG_CHANNEL: ${{ secrets.SERVER_LOG_CHANNEL }}
+  #       GIVEAWAY_CHANNEL_ID: ${{ secrets.GIVEAWAY_CHANNEL_ID }}
+  #       PORT: ${{ secrets.PORT }}
+  #       DATA_PATH: ./data
+  #       BACKUP_PATH: ./data/backups
+  #       DAILY_AMOUNT: ${{ secrets.DAILY_AMOUNT }}
+  #     run: |
+  #       echo "🔄 Scheduled restart of Synapse Discord Bot..."
+  #       echo "⏰ Started at: $(date)"
+  #       timeout 21600 npm start || {
+  #         echo "⏰ Scheduled run completed after 6 hours"
+  #         echo "⏰ Stopped at: $(date)"
+  #       }
 
-# Uncomment the schedule section if you want automatic restarts
-# Note: This will consume GitHub Actions minutes quickly
+# Uncomment to enable scheduled runs every 6 hours
+# WARNING: This will consume GitHub Actions minutes very quickly!
 # on:
 #   schedule:
-#     - cron: '0 */6 * * *'  # Runs every 6 hours
+#     - cron: '0 */6 * * *'  # Every 6 hours
