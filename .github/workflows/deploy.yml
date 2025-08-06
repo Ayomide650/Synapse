@@ -2,64 +2,147 @@ name: Deploy Synapse Bot
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
+env:
+  NODE_VERSION: '20.x'
+
 jobs:
   test:
+    name: Run Tests
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Setup Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
-        node-version: '18.x'
+        node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
-    - run: npm ci
-    - run: npm test
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run tests
+      run: npm test
+      
+    - name: Run linting (if available)
+      run: npm run lint --if-present
 
   build:
+    name: Build Application
     needs: test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Setup Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
-        node-version: '18.x'
+        node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
-    - run: npm ci
-    - run: npm run build --if-present
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build application
+      run: npm run build --if-present
+      
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
+      if: success()
       with:
-        name: dist
-        path: dist/
+        name: build-artifacts
+        path: |
+          dist/
+          build/
+        retention-days: 1
 
   deploy-render:
-    needs: build
+    name: Deploy to Render
+    needs: [test, build]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Deploy to Render
       env:
         RENDER_TOKEN: ${{ secrets.RENDER_TOKEN }}
         RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
       run: |
-        curl -X POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
-        -H "Authorization: Bearer $RENDER_TOKEN"
+        echo "Deploying to Render..."
+        response=$(curl -s -X POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
+          -H "Authorization: Bearer $RENDER_TOKEN" \
+          -H "Content-Type: application/json")
+        echo "Render API Response: $response"
+        
+        # Check if deployment was successful
+        if echo "$response" | grep -q '"id"'; then
+          echo "✅ Deployment triggered successfully"
+        else
+          echo "❌ Deployment failed"
+          exit 1
+        fi
 
   deploy-railway:
-    needs: build
+    name: Deploy to Railway
+    needs: [test, build]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        
     - name: Install Railway CLI
-      run: npm i -g @railway/cli
+      run: npm install -g @railway/cli@latest
+      
     - name: Deploy to Railway
       env:
         RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      run: railway up
+      run: |
+        echo "Deploying to Railway..."
+        railway up --detach
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ Railway deployment successful"
+        else
+          echo "❌ Railway deployment failed"
+          exit 1
+        fi
+
+  notify:
+    name: Notify Deployment Status
+    needs: [deploy-render, deploy-railway]
+    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+    - name: Deployment Summary
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Service | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|---------|---------|" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.deploy-render.result }}" == "success" ]; then
+          echo "| Render | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Render | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ needs.deploy-railway.result }}" == "success" ]; then
+          echo "| Railway | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Railway | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+        fi
