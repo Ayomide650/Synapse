@@ -3,6 +3,66 @@ const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, ActionRowBuilder
 // Store active giveaways
 const activeGiveaways = new Map();
 
+// Utility function to parse time with Nigeria timezone (WAT - UTC+1)
+function parseTime(timeString) {
+    const timeRegex = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i;
+    const match = timeString.match(timeRegex);
+    
+    if (!match) {
+        throw new Error('Invalid time format. Please use format like "5:30PM" or "11:45AM"');
+    }
+    
+    let hours = parseInt(match[1]);
+    const minutes = parseInt(match[2]);
+    const period = match[3].toUpperCase();
+    
+    if (hours < 1 || hours > 12 || minutes < 0 || minutes > 59) {
+        throw new Error('Invalid time values. Hours must be 1-12, minutes 0-59');
+    }
+    
+    // Convert to 24-hour format
+    if (period === 'AM' && hours === 12) {
+        hours = 0;
+    } else if (period === 'PM' && hours !== 12) {
+        hours += 12;
+    }
+    
+    // Get current time in Nigeria timezone (WAT - UTC+1)
+    const now = new Date();
+    const nowInNigeria = new Date(now.getTime() + (1 * 60 * 60 * 1000)); // Add 1 hour for WAT
+    
+    // Create the target time in Nigeria timezone
+    const endTimeInNigeria = new Date(nowInNigeria);
+    endTimeInNigeria.setHours(hours, minutes, 0, 0);
+    
+    // If time has already passed today in Nigeria time, set for tomorrow
+    if (endTimeInNigeria <= nowInNigeria) {
+        endTimeInNigeria.setDate(endTimeInNigeria.getDate() + 1);
+    }
+    
+    // Convert back to UTC for storage (subtract 1 hour)
+    const endTimeUTC = new Date(endTimeInNigeria.getTime() - (1 * 60 * 60 * 1000));
+    
+    return endTimeUTC;
+}
+
+// Function to format date consistently in Nigeria timezone
+function formatEndTime(date) {
+    // Convert UTC time to Nigeria time (WAT - UTC+1)
+    const nigeriaTime = new Date(date.getTime() + (1 * 60 * 60 * 1000));
+    
+    const options = {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+    };
+    
+    return nigeriaTime.toLocaleString('en-US', options) + ' WAT';
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('giveaway')
@@ -11,6 +71,15 @@ module.exports = {
 
   async execute(interaction) {
     try {
+      // Check if command is used in the designated giveaway channel (if env variable is set)
+      if (process.env.GIVEAWAY_CHANNEL_ID && interaction.channel.id !== process.env.GIVEAWAY_CHANNEL_ID) {
+        await interaction.reply({ 
+          content: 'This command can only be used in the designated giveaway channel.', 
+          ephemeral: true 
+        });
+        return;
+      }
+
       const modal = new ModalBuilder()
         .setCustomId('giveaway_create')
         .setTitle('Create Giveaway');
@@ -24,10 +93,10 @@ module.exports = {
 
       const durationInput = new TextInputBuilder()
         .setCustomId('duration')
-        .setLabel('Duration in minutes')
+        .setLabel('End Time (e.g., 5:30PM)')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setPlaceholder('Enter duration in minutes (e.g., 60)');
+        .setPlaceholder('Format: 5:30PM or 11:45AM');
 
       const winnersInput = new TextInputBuilder()
         .setCustomId('winners')
@@ -60,25 +129,27 @@ module.exports = {
     }
   },
 
-  async handleModalSubmit(interaction) {
+  async handleModal(interaction) {
     if (interaction.customId !== 'giveaway_create') return;
 
     try {
       const prize = interaction.fields.getTextInputValue('prize');
-      const duration = parseInt(interaction.fields.getTextInputValue('duration'));
+      const duration = interaction.fields.getTextInputValue('duration');
       const winners = parseInt(interaction.fields.getTextInputValue('winners'));
       const description = interaction.fields.getTextInputValue('description') || null;
 
       // Validate inputs
-      if (isNaN(duration) || duration < 1) {
-        throw new Error('Duration must be a positive number of minutes.');
-      }
       if (isNaN(winners) || winners < 1) {
         throw new Error('Number of winners must be a positive number.');
       }
 
-      const endTime = new Date(Date.now() + duration * 60000);
+      const endTime = parseTime(duration);
       const giveawayId = Date.now().toString();
+
+      console.log(`Creating giveaway ${giveawayId}`);
+      console.log(`Input time: ${duration}`);
+      console.log(`Parsed end time (UTC): ${endTime.toISOString()}`);
+      console.log(`Display end time (WAT): ${formatEndTime(endTime)}`);
 
       // Create giveaway embed
       const embed = new EmbedBuilder()
@@ -88,7 +159,7 @@ module.exports = {
           `${description ? `**Description:** ${description}\n` : ''}` +
           `**Winners:** ${winners}\n` +
           `**Participants:** 0\n` +
-          `**Ends:** <t:${Math.floor(endTime.getTime() / 1000)}:R>`
+          `**Ends:** ${formatEndTime(endTime)}`
         )
         .setColor(0x00ff00)
         .setTimestamp();
@@ -100,7 +171,7 @@ module.exports = {
 
       const endButton = new ButtonBuilder()
         .setCustomId(`end_${giveawayId}`)
-        .setLabel('End Giveaway')
+        .setLabel('END')
         .setStyle(ButtonStyle.Danger);
 
       const row = new ActionRowBuilder().addComponents(participateButton, endButton);
@@ -118,15 +189,13 @@ module.exports = {
         hostId: interaction.user.id
       });
 
-      // Set timeout to end giveaway
-      setTimeout(() => this.endGiveaway(giveawayId), duration * 60000);
-
       await interaction.reply({
-        content: `🎉 Giveaway created successfully! It will end ${duration} minutes from now.`,
+        content: `🎉 Giveaway created successfully! It will end at **${formatEndTime(endTime)}**`,
         ephemeral: true
       });
 
     } catch (error) {
+      console.error('Error in modal submit:', error);
       await interaction.reply({
         content: `❌ Error: ${error.message}`,
         ephemeral: true
@@ -184,34 +253,38 @@ module.exports = {
   },
 
   async updateGiveawayMessage(giveaway, giveawayId) {
-    const embed = new EmbedBuilder()
-      .setTitle('🎉 Giveaway Active')
-      .setDescription(
-        `**Prize:** ${giveaway.prize}\n` +
-        `${giveaway.description ? `**Description:** ${giveaway.description}\n` : ''}` +
-        `**Winners:** ${giveaway.winners}\n` +
-        `**Participants:** ${giveaway.participants.length}\n` +
-        `**Ends:** <t:${Math.floor(giveaway.endTime.getTime() / 1000)}:R>`
-      )
-      .setColor(0x00ff00)
-      .setTimestamp();
+    try {
+      const embed = new EmbedBuilder()
+        .setTitle('🎉 Giveaway Active')
+        .setDescription(
+          `**Prize:** ${giveaway.prize}\n` +
+          `${giveaway.description ? `**Description:** ${giveaway.description}\n` : ''}` +
+          `**Winners:** ${giveaway.winners}\n` +
+          `**Participants:** ${giveaway.participants.length}\n` +
+          `**Ends:** ${formatEndTime(giveaway.endTime)}`
+        )
+        .setColor(0x00ff00)
+        .setTimestamp();
 
-    const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`participate_${giveawayId}`)
-        .setLabel('🎁 Participate')
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(`end_${giveawayId}`)
-        .setLabel('End Giveaway')
-        .setStyle(ButtonStyle.Danger)
-    );
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`participate_${giveawayId}`)
+          .setLabel('🎁 Participate')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`end_${giveawayId}`)
+          .setLabel('END')
+          .setStyle(ButtonStyle.Danger)
+      );
 
-    const message = await giveaway.channel.messages.fetch(giveaway.messageId);
-    await message.edit({ embeds: [embed], components: [buttons] });
+      const message = await giveaway.channel.messages.fetch(giveaway.messageId);
+      await message.edit({ embeds: [embed], components: [buttons] });
+    } catch (error) {
+      console.error('Error updating giveaway message:', error);
+    }
   },
 
-  async endGiveaway(giveawayId) {
+  async endGiveaway(giveawayId, forceEnd = false) {
     const giveaway = activeGiveaways.get(giveawayId);
     if (!giveaway) return;
 
@@ -249,15 +322,35 @@ module.exports = {
         await message.edit({ embeds: [embed], components: [] });
 
         // Tag winners in a separate message
-        await giveaway.channel.send(
-          `🎉 Congratulations ${winnersText}! You won: **${giveaway.prize}**`
-        );
+        if (winnersList.length > 0) {
+          await giveaway.channel.send(
+            `🎉 Congratulations ${winnersText}! You won: **${giveaway.prize}**`
+          );
+        }
       }
 
       activeGiveaways.delete(giveawayId);
+      console.log(`Giveaway ${giveawayId} ended at ${new Date().toISOString()}`);
 
     } catch (error) {
       console.error('Error ending giveaway:', error);
     }
+  },
+
+  // Method to check and end expired giveaways (to be called by a cron job or timer)
+  checkExpiredGiveaways() {
+    const now = new Date();
+    
+    for (const [giveawayId, giveaway] of activeGiveaways) {
+      if (now >= giveaway.endTime) {
+        console.log(`Ending expired giveaway ${giveawayId}`);
+        this.endGiveaway(giveawayId);
+      }
+    }
+  },
+
+  // Getter for active giveaways (useful for debugging)
+  getActiveGiveaways() {
+    return activeGiveaways;
   }
 };
