@@ -17,6 +17,11 @@ const client = new Client({
   ] 
 });
 
+// Add these debug logs right here
+console.log('🚀 Bot starting...');
+console.log('Token exists:', !!config.token);
+console.log('Client ID exists:', !!config.clientId);
+console.log('Token starts with:', config.token ? config.token.substring(0, 20) + '...' : 'undefined');
 // Express health check server
 const app = express();
 const port = config.port;
