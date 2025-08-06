@@ -5,6 +5,7 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch: # Allows manual triggering
 
 env:
   NODE_VERSION: '20.x'
@@ -32,10 +33,12 @@ jobs:
     - name: Run linting (if available)
       run: npm run lint --if-present
 
-  build:
-    name: Build Application
+  deploy:
+    name: Deploy Bot on GitHub Actions
     needs: test
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -49,53 +52,43 @@ jobs:
     - name: Install dependencies
       run: npm ci
       
-    - name: Build application
-      run: npm run build --if-present
-      
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      if: success()
-      with:
-        name: build-artifacts
-        path: |
-          dist/
-          build/
-        retention-days: 1
-
-  deploy-render:
-    name: Deploy to Render
-    needs: [test, build]
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Deploy to Render
+    - name: Start Discord Bot
       env:
-        RENDER_TOKEN: ${{ secrets.RENDER_TOKEN }}
-        RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-      run: |
-        echo "Deploying to Render..."
-        response=$(curl -s -X POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
-          -H "Authorization: Bearer $RENDER_TOKEN" \
-          -H "Content-Type: application/json")
-        echo "Render API Response: $response"
+        # Discord Bot Configuration
+        DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
         
-        # Check if deployment was successful
-        if echo "$response" | grep -q '"id"'; then
-          echo "✅ Deployment triggered successfully"
-        else
-          echo "❌ Deployment failed"
-          exit 1
-        fi
+        # Channel IDs
+        SERVER_LOG_CHANNEL: ${{ secrets.SERVER_LOG_CHANNEL }}
+        GIVEAWAY_CHANNEL_ID: ${{ secrets.GIVEAWAY_CHANNEL_ID }}
+        
+        # Server Configuration
+        PORT: ${{ secrets.PORT }}
+        
+        # Database Paths (GitHub Actions filesystem)
+        DATA_PATH: ./data
+        BACKUP_PATH: ./data/backups
+        
+        # Economy Settings
+        DAILY_AMOUNT: ${{ secrets.DAILY_AMOUNT }}
+      run: |
+        echo "🤖 Starting Synapse Discord Bot..."
+        echo "Bot will run for up to 6 hours on GitHub Actions"
+        echo "Started at: $(date)"
+        
+        # Create data directories if they don't exist
+        mkdir -p ./data/backups
+        
+        # Add timeout to prevent hanging
+        timeout 21600 npm start || {
+          echo "⚠️  Bot stopped after 6 hours (GitHub Actions limit)"
+          echo "Stopped at: $(date)"
+        }
 
-  deploy-railway:
-    name: Deploy to Railway
-    needs: [test, build]
+  # Optional: Create a job that runs on schedule to restart the bot
+  scheduled-deploy:
+    name: Scheduled Bot Restart
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event_name == 'schedule'
     environment: production
     steps:
     - name: Checkout code
@@ -105,44 +98,43 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
         
-    - name: Install Railway CLI
-      run: npm install -g @railway/cli@latest
+    - name: Install dependencies
+      run: npm ci
       
-    - name: Deploy to Railway
+    - name: Start Discord Bot (Scheduled)
       env:
-        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      run: |
-        echo "Deploying to Railway..."
-        railway up --detach
+        # Discord Bot Configuration
+        DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
         
-        if [ $? -eq 0 ]; then
-          echo "✅ Railway deployment successful"
-        else
-          echo "❌ Railway deployment failed"
-          exit 1
-        fi
+        # Channel IDs
+        SERVER_LOG_CHANNEL: ${{ secrets.SERVER_LOG_CHANNEL }}
+        GIVEAWAY_CHANNEL_ID: ${{ secrets.GIVEAWAY_CHANNEL_ID }}
+        
+        # Server Configuration
+        PORT: ${{ secrets.PORT }}
+        
+        # Database Paths (GitHub Actions filesystem)
+        DATA_PATH: ./data
+        BACKUP_PATH: ./data/backups
+        
+        # Economy Settings
+        DAILY_AMOUNT: ${{ secrets.DAILY_AMOUNT }}
+      run: |
+        echo "🔄 Scheduled restart of Synapse Discord Bot..."
+        echo "Started at: $(date)"
+        
+        # Create data directories if they don't exist
+        mkdir -p ./data/backups
+        
+        timeout 21600 npm start || {
+          echo "⚠️  Scheduled run completed after 6 hours"
+          echo "Stopped at: $(date)"
+        }
 
-  notify:
-    name: Notify Deployment Status
-    needs: [deploy-render, deploy-railway]
-    runs-on: ubuntu-latest
-    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-    - name: Deployment Summary
-      run: |
-        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
-        echo "| Service | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|---------|---------|" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ needs.deploy-render.result }}" == "success" ]; then
-          echo "| Render | ✅ Success |" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "| Render | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        if [ "${{ needs.deploy-railway.result }}" == "success" ]; then
-          echo "| Railway | ✅ Success |" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "| Railway | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
-        fi
+# Uncomment the schedule section if you want automatic restarts
+# Note: This will consume GitHub Actions minutes quickly
+# on:
+#   schedule:
+#     - cron: '0 */6 * * *'  # Runs every 6 hours
