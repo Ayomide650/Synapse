@@ -182,6 +182,24 @@ client.on('messageCreate', async message => {
 // Global Error Handler
 ErrorHandler.handleGlobal(client);
 
+// Self-ping to keep Render service alive
+const https = require('https');
+const selfPing = () => {
+  const url = process.env.RENDER_EXTERNAL_URL || 'https://synapse-a4kn.onrender.com';
+  
+  https.get(url, (res) => {
+    console.log(`🏓 Self-ping successful: ${res.statusCode} at ${new Date().toLocaleTimeString()}`);
+  }).on('error', (err) => {
+    console.error('❌ Self-ping failed:', err.message);
+  });
+};
+
+// Start self-ping every 10 minutes (600,000 ms)
+setInterval(selfPing, 10 * 60 * 1000);
+
+// Initial ping after 30 seconds
+setTimeout(selfPing, 30000);
+
 // Login to Discord
 console.log('🔑 Attempting to login to Discord...');
 client.login(config.token).then(() => {
