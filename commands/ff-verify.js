@@ -50,10 +50,19 @@ module.exports = {
 
   async handleVerificationModal(interaction) {
     try {
-      const uid = interaction.fields.getTextInputValue('uid');
-      const region = interaction.fields.getTextInputValue('region').toLowerCase();
+      const uid = interaction.fields.getTextInputValue('uid').trim();
+      const region = interaction.fields.getTextInputValue('region').toLowerCase().trim();
       const userId = interaction.user.id;
       const verificationKey = `${userId}-${uid}`;
+
+      // Validate UID (should be numeric and reasonable length)
+      if (!/^\d+$/.test(uid) || uid.length < 8 || uid.length > 12) {
+        await interaction.reply({
+          content: '❌ Invalid UID format. Please enter a valid numeric Free Fire UID (8-12 digits).',
+          ephemeral: true
+        });
+        return;
+      }
 
       // Validate region
       const validRegions = ['sg', 'ind', 'br', 'id', 'tw', 'us', 'sac', 'th', 'me', 'pk', 'cis', 'bd'];
@@ -94,11 +103,17 @@ module.exports = {
         return;
       }
 
+      // Show initial loading message
+      await interaction.reply({
+        content: '🔍 Checking your Free Fire account...',
+        ephemeral: true
+      });
+
       // Fetch initial account info to validate UID
       const accountInfo = await this.fetchAccountInfo(uid, region);
       if (!accountInfo) {
-        await interaction.reply({
-          content: '❌ Could not fetch account information. Please check your UID and region.',
+        await interaction.editReply({
+          content: '❌ Account doesn\'t exist. Please check your UID and region and try again.',
           ephemeral: true
         });
         return;
@@ -132,9 +147,9 @@ module.exports = {
         .setFooter({ text: 'UUID expires in 5 minutes' })
         .setTimestamp();
 
-      await interaction.reply({
-        embeds: [embed],
-        ephemeral: true
+      await interaction.editReply({
+        content: '',
+        embeds: [embed]
       });
 
       // Set automatic verification timer
@@ -149,10 +164,18 @@ module.exports = {
 
     } catch (error) {
       console.error('Error handling verification modal:', error);
-      await interaction.reply({
-        content: '❌ An error occurred during verification. Please try again.',
-        ephemeral: true
-      });
+      
+      // Check if interaction was already replied to
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({
+          content: '❌ An error occurred during verification. Please try again.',
+        });
+      } else {
+        await interaction.reply({
+          content: '❌ An error occurred during verification. Please try again.',
+          ephemeral: true
+        });
+      }
     }
   },
 
@@ -168,13 +191,13 @@ module.exports = {
       const currentInfo = await this.fetchAccountInfo(verificationData.uid, verificationData.region);
       if (!currentInfo) {
         console.error('Failed to fetch account info during verification');
-        await this.sendVerificationFailureDM(verificationData.userId, client, 'Failed to fetch account information');
+        await this.sendVerificationFailureDM(verificationData.userId, client, 'Failed to fetch account information during verification');
         pendingVerifications.delete(verificationKey);
         return;
       }
 
       // Check if signature matches verification code
-      if (currentInfo['Account Signature'] === verificationData.code) {
+      if (currentInfo['Account Signature'] && currentInfo['Account Signature'].includes(verificationData.code)) {
         // Verification successful!
         const member = await guild.members.fetch(verificationData.userId).catch(() => null);
         if (member) {
@@ -203,12 +226,16 @@ module.exports = {
               console.log('Could not send success DM:', dmError.message);
             }
           } else {
-            console.error('Verified role not found');
+            console.error('Verified role not found in guild');
+            await this.sendVerificationFailureDM(verificationData.userId, client, 'Verified role not found in server');
           }
+        } else {
+          console.error('Member not found in guild');
+          await this.sendVerificationFailureDM(verificationData.userId, client, 'Member not found in server');
         }
       } else {
         // Verification failed - signature doesn't match
-        await this.sendVerificationFailureDM(verificationData.userId, client, null);
+        await this.sendVerificationFailureDM(verificationData.userId, client, 'UUID not found in your signature. Please make sure you set the UUID exactly as provided.');
       }
 
       // Clean up verification data
@@ -218,7 +245,7 @@ module.exports = {
       console.error('Error during automatic verification:', error);
       const verificationData = pendingVerifications.get(verificationKey);
       if (verificationData) {
-        await this.sendVerificationFailureDM(verificationData.userId, client, 'An unexpected error occurred');
+        await this.sendVerificationFailureDM(verificationData.userId, client, 'An unexpected error occurred during verification');
         pendingVerifications.delete(verificationKey);
       }
     }
@@ -227,9 +254,15 @@ module.exports = {
   async sendVerificationFailureDM(userId, client, customError = null) {
     try {
       const user = await client.users.fetch(userId);
-      const message = customError || 'Unable to verify your uid, Please try again';
+      const message = customError || 'Unable to verify your UID. Please try again.';
       
-      await user.send(`❌ ${message}`);
+      const failEmbed = new EmbedBuilder()
+        .setTitle('❌ Verification Failed')
+        .setColor(0xff0000)
+        .setDescription(`${message}\n\nYou can try the verification process again using \`/ff-verify\`.`)
+        .setTimestamp();
+
+      await user.send({ embeds: [failEmbed] });
     } catch (error) {
       console.error('Failed to send verification failure DM:', error);
     }
@@ -237,11 +270,61 @@ module.exports = {
 
   async fetchAccountInfo(uid, region) {
     try {
-      const response = await fetch(`${BASE_URL}/${region}/${uid}?key=${API_KEY}`);
-      if (!response.ok) return null;
-      return await response.json();
+      console.log(`Fetching account info for UID: ${uid}, Region: ${region}`);
+      const url = `${BASE_URL}/${region}/${uid}?key=${API_KEY}`;
+      console.log(`API URL: ${url}`);
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Discord-Bot/1.0',
+          'Accept': 'application/json'
+        },
+        timeout: 10000 // 10 second timeout
+      });
+
+      console.log(`API Response Status: ${response.status}`);
+
+      if (response.status === 400) {
+        console.log('API returned 400 - Invalid region or request');
+        return null;
+      }
+
+      if (response.status === 429) {
+        console.log('API returned 429 - Rate limited');
+        return null;
+      }
+
+      if (response.status === 500) {
+        console.log('API returned 500 - Account not found or server error');
+        return null;
+      }
+
+      if (!response.ok) {
+        console.log(`API returned status ${response.status}`);
+        return null;
+      }
+
+      const data = await response.json();
+      console.log('Account info fetched successfully');
+      
+      // Validate that we have the required fields
+      if (!data || !data['Account Name'] || !data['Account UID']) {
+        console.log('Invalid account data structure');
+        return null;
+      }
+      
+      return data;
+
     } catch (error) {
-      console.error('Error fetching account info:', error);
+      console.error('Error fetching account info:', error.message);
+      
+      if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+        console.error('Network error - API might be down');
+      } else if (error.name === 'AbortError') {
+        console.error('Request timeout');
+      }
+      
       return null;
     }
   },
