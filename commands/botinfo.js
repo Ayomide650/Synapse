@@ -2,6 +2,7 @@ const { SlashCommandBuilder, EmbedBuilder, version: discordVersion } = require('
 const { version } = require('../package.json');
 const fs = require('fs');
 const path = require('path');
+const config = require('../config/config'); // Import config for correct paths
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -21,17 +22,8 @@ module.exports = {
       const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
       const totalCommands = commandFiles.length;
 
-      // Get JSON storage stats
-      const dataPath = path.join(__dirname, '../data');
-      let storageStats = { files: 0, size: 0 };
-      if (fs.existsSync(dataPath)) {
-        const files = fs.readdirSync(dataPath).filter(file => file.endsWith('.json'));
-        storageStats.files = files.length;
-        for (const file of files) {
-          const stats = fs.statSync(path.join(dataPath, file));
-          storageStats.size += stats.size;
-        }
-      }
+      // Get JSON storage stats using correct config paths
+      const storageStats = await this.getStorageStats();
 
       // Create embed
       const embed = new EmbedBuilder()
@@ -53,8 +45,9 @@ module.exports = {
             name: '💾 Storage',
             value: `
 • JSON Files: ${storageStats.files}
-• Total Size: ${(storageStats.size / 1024 / 1024).toFixed(2)} MB
-• Last Backup: ${this.getLastBackupTime(dataPath)}
+• Total Size: ${storageStats.sizeFormatted}
+• Backup Files: ${storageStats.backupFiles}
+• Last Backup: ${storageStats.lastBackup}
             `,
             inline: false
           },
@@ -63,7 +56,7 @@ module.exports = {
             value: `
 • Bot Version: v${version}
 • Last Updated: ${this.getLastUpdateTime()}
-• Created By: Your Name
+• Uptime: ${this.formatUptime(client.uptime)}
             `,
             inline: false
           }
@@ -71,15 +64,17 @@ module.exports = {
         .setFooter({ text: 'Need help? Use /help command' })
         .setTimestamp();
 
-      // Add changelog if available
-      const changelog = this.getLatestChangelog();
-      if (changelog) {
-        embed.addFields({
-          name: '📝 Latest Changes',
-          value: changelog,
-          inline: false
-        });
-      }
+      // Add memory usage
+      const memUsage = process.memoryUsage();
+      embed.addFields({
+        name: '⚡ Performance',
+        value: `
+• Memory: ${(memUsage.heapUsed / 1024 / 1024).toFixed(2)} MB
+• CPU: ${process.cpuUsage().user / 1000}ms
+• Ping: ${client.ws.ping}ms
+        `,
+        inline: true
+      });
 
       await interaction.reply({ embeds: [embed] });
 
@@ -92,19 +87,76 @@ module.exports = {
     }
   },
 
-  getLastBackupTime(dataPath) {
+  async getStorageStats() {
     try {
-      const backupPath = path.join(dataPath, 'backups');
-      if (!fs.existsSync(backupPath)) return 'No backups found';
+      // Use config paths instead of hardcoded relative paths
+      const dataPath = path.resolve(process.cwd(), config.dataPath);
+      const backupPath = path.resolve(process.cwd(), config.backupPath);
+      
+      let stats = {
+        files: 0,
+        size: 0,
+        backupFiles: 0,
+        backupSize: 0,
+        sizeFormatted: '0 KB',
+        lastBackup: 'None'
+      };
 
-      const files = fs.readdirSync(backupPath)
-        .filter(file => file.endsWith('.json'))
-        .map(file => fs.statSync(path.join(backupPath, file)).mtime)
-        .sort((a, b) => b - a);
+      // Check main data directory
+      if (fs.existsSync(dataPath)) {
+        const files = fs.readdirSync(dataPath).filter(file => file.endsWith('.json'));
+        stats.files = files.length;
+        
+        for (const file of files) {
+          try {
+            const filePath = path.join(dataPath, file);
+            const fileStats = fs.statSync(filePath);
+            stats.size += fileStats.size;
+          } catch (err) {
+            console.log(`Could not read stats for ${file}:`, err.message);
+          }
+        }
+      }
 
-      return files.length ? files[0].toLocaleString() : 'No backups found';
-    } catch {
-      return 'Unknown';
+      // Check backup directory
+      if (fs.existsSync(backupPath)) {
+        const backupFiles = fs.readdirSync(backupPath).filter(file => file.endsWith('.bak'));
+        stats.backupFiles = backupFiles.length;
+        
+        // Get most recent backup time
+        if (backupFiles.length > 0) {
+          const backupTimes = backupFiles.map(file => {
+            try {
+              return fs.statSync(path.join(backupPath, file)).mtime;
+            } catch {
+              return new Date(0);
+            }
+          }).sort((a, b) => b - a);
+          
+          stats.lastBackup = backupTimes[0].toLocaleString();
+        }
+      }
+
+      // Format size nicely
+      if (stats.size > 1024 * 1024) {
+        stats.sizeFormatted = `${(stats.size / 1024 / 1024).toFixed(2)} MB`;
+      } else if (stats.size > 1024) {
+        stats.sizeFormatted = `${(stats.size / 1024).toFixed(2)} KB`;
+      } else {
+        stats.sizeFormatted = `${stats.size} bytes`;
+      }
+
+      return stats;
+
+    } catch (error) {
+      console.error('Error getting storage stats:', error);
+      return {
+        files: 0,
+        size: 0,
+        backupFiles: 0,
+        sizeFormatted: 'Error reading',
+        lastBackup: 'Error'
+      };
     }
   },
 
@@ -117,19 +169,17 @@ module.exports = {
     }
   },
 
-  getLatestChangelog() {
-    try {
-      const changelogPath = path.join(__dirname, '../CHANGELOG.md');
-      if (!fs.existsSync(changelogPath)) return null;
+  formatUptime(uptime) {
+    if (!uptime) return 'Unknown';
+    
+    const seconds = Math.floor(uptime / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
 
-      const changelog = fs.readFileSync(changelogPath, 'utf8')
-        .split('\n')
-        .slice(0, 5)
-        .join('\n');
-
-      return changelog || 'No recent changes';
-    } catch {
-      return null;
-    }
+    if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
   }
 };
