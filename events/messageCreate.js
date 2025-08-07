@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const ms = require('ms');
+const database = require('../utils/database'); // Import your database utility
 
 const CONFIG_PATH = path.join(__dirname, '../data/config.json');
 const DATA_PATH = path.join(__dirname, '../data/levels.json');
@@ -13,12 +14,45 @@ function calculateLevel(messages) {
   return Math.floor(Math.sqrt(messages / 5));
 }
 
+// Function to check and assign level roles from leveling.json
+async function checkLevelRoles(message, userId, newLevel, oldLevel) {
+  try {
+    const levelingData = await database.read('leveling.json');
+    if (!levelingData?.levelRoles) return [];
+
+    const member = message.member;
+    let rolesAssigned = [];
+
+    // Check all levels from oldLevel+1 to newLevel
+    for (let level = oldLevel + 1; level <= newLevel; level++) {
+      const roleId = levelingData.levelRoles[level.toString()];
+      if (roleId) {
+        try {
+          const role = await message.guild.roles.fetch(roleId);
+          if (role && !member.roles.cache.has(roleId)) {
+            await member.roles.add(role);
+            rolesAssigned.push({ level, role: role.name });
+            console.log(`Assigned role ${role.name} to ${member.user.tag} for level ${level}`);
+          }
+        } catch (error) {
+          console.log(`Failed to assign role for level ${level}:`, error.message);
+        }
+      }
+    }
+
+    return rolesAssigned;
+  } catch (error) {
+    console.error('Error checking level roles:', error);
+    return [];
+  }
+}
+
 module.exports = {
   name: 'messageCreate',
   async execute(message) {
     if (message.author.bot) return;
 
-    // Handle word filters
+    // Handle word filters (unchanged)
     if (fs.existsSync(CONFIG_PATH)) {
       const config = JSON.parse(fs.readFileSync(CONFIG_PATH));
       if (config.filters && config.filters.length > 0) {
@@ -128,10 +162,21 @@ module.exports = {
       // Level up check
       const oldLevel = calculateLevel((userData.messages || 1) - 1);
       const newLevel = calculateLevel(userData.messages);
+      
       if (newLevel > oldLevel) {
+        // Basic level up message
         message.channel.send(`🎉 Congratulations ${message.author}! You've reached level ${newLevel}!`);
         
-        // Check for role rewards
+        // Check for role rewards from leveling.json (your rankrole system)
+        const rolesAssigned = await checkLevelRoles(message, message.author.id, newLevel, oldLevel);
+        
+        // Send role reward messages
+        if (rolesAssigned.length > 0) {
+          const roleNames = rolesAssigned.map(r => `**${r.role}** (Level ${r.level})`).join(', ');
+          message.channel.send(`🏆 **New Role Rewards:** ${roleNames}`);
+        }
+        
+        // LEGACY: Also check config.json for backward compatibility
         if (fs.existsSync(CONFIG_PATH)) {
           const config = JSON.parse(fs.readFileSync(CONFIG_PATH));
           if (config.rank_roles) {
@@ -140,7 +185,7 @@ module.exports = {
                 const role = await message.guild.roles.fetch(roleId);
                 if (role && !message.member.roles.cache.has(roleId)) {
                   await message.member.roles.add(role);
-                  message.channel.send(`🎊 ${message.author} earned the ${role.name} role!`);
+                  message.channel.send(`🎊 ${message.author} earned the ${role.name} role! (Legacy)`);
                 }
               }
             });
@@ -151,13 +196,25 @@ module.exports = {
         if (XP_LOGS_CHANNEL) {
           const logsChannel = message.guild.channels.cache.get(XP_LOGS_CHANNEL);
           if (logsChannel) {
+            let logMessage = `${message.author} has leveled up to ${newLevel}!`;
+            
+            if (rolesAssigned.length > 0) {
+              const roleList = rolesAssigned.map(r => r.role).join(', ');
+              logMessage += `\n🏆 **Roles Assigned:** ${roleList}`;
+            }
+            
             logsChannel.send({
-              content: `${message.author} has leveled up to ${newLevel}!`,
+              content: logMessage,
               embeds: [{
                 title: 'Level Up!',
                 description: `**Level:** ${oldLevel} → ${newLevel}\n**Total Messages:** ${userData.messages}\n**Total XP:** ${userData.xp}`,
                 color: 0xffac33,
-                thumbnail: { url: message.author.displayAvatarURL() }
+                thumbnail: { url: message.author.displayAvatarURL() },
+                fields: rolesAssigned.length > 0 ? [{
+                  name: '🏆 New Roles',
+                  value: rolesAssigned.map(r => `${r.role} (Level ${r.level})`).join('\n'),
+                  inline: false
+                }] : []
               }]
             });
           }
