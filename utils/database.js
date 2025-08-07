@@ -5,14 +5,22 @@ const config = require('../config/config');
 class Database {
   constructor() {
     this.cache = new Map();
-    this.dataPath = path.join(process.cwd(), config.dataPath);
-    this.backupPath = path.join(process.cwd(), config.backupPath);
+    
+    // Handle both old and new config structures
+    const currentConfig = typeof config.getCurrentConfig === 'function' 
+      ? config.getCurrentConfig() 
+      : config;
+    
+    this.dataPath = path.join(process.cwd(), currentConfig.dataPath);
+    this.backupPath = path.join(process.cwd(), currentConfig.backupPath);
     this.configPath = path.join(process.cwd(), 'db.config.json');
     this.metadataPath = path.join(this.dataPath, '.metadata.json');
     this.isInitialized = false;
-    this.compressionEnabled = config.compression || true;
-    this.maxBackups = config.maxBackups || 10;
-    this.maxCacheSize = config.maxCacheSize || 1000; // Max items in cache
+    
+    // Use config values with fallbacks
+    this.compressionEnabled = currentConfig.compression !== false;
+    this.maxBackups = currentConfig.maxBackups || 10;
+    this.maxCacheSize = currentConfig.maxCacheSize || 1000;
     
     // Auto-initialize on startup
     this.initialize();
@@ -54,13 +62,18 @@ class Database {
       const configData = await fs.readFile(this.configPath, 'utf8');
       this.config = JSON.parse(configData);
     } catch (error) {
+      // Get current config for defaults
+      const currentConfig = typeof config.getCurrentConfig === 'function' 
+        ? config.getCurrentConfig() 
+        : config;
+      
       // Create default config if doesn't exist
       this.config = {
         version: '1.0.0',
-        persistCache: true,
-        autoBackup: true,
-        compressionLevel: 6,
-        maxFileSize: 10 * 1024 * 1024, // 10MB per file
+        persistCache: currentConfig.database?.persistCache !== false,
+        autoBackup: currentConfig.database?.autoBackup !== false,
+        compressionLevel: currentConfig.database?.compressionLevel || 6,
+        maxFileSize: currentConfig.maxFileSize || 10 * 1024 * 1024, // 10MB per file
         created: new Date().toISOString(),
         lastStartup: new Date().toISOString()
       };
