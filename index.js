@@ -123,45 +123,36 @@ client.on('error', error => {
   console.error('❌ Discord client error:', error);
 });
 
-// Command Interaction Handler
+// COMBINED Interaction Handler - This handles ALL interaction types
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  
-  const command = client.commands.get(interaction.commandName);
-  if (!command) return;
-  
   try {
-    await command.execute(interaction);
+    // Handle slash commands
+    if (interaction.isChatInputCommand()) {
+      const command = client.commands.get(interaction.commandName);
+      if (!command) return;
+      
+      await command.execute(interaction);
+    }
+    
+    // Handle button interactions
+    else if (interaction.isButton()) {
+      const [commandName] = interaction.customId.split('_');
+      const command = client.commands.get(commandName);
+      if (!command || !command.handleButton) return;
+      
+      await command.handleButton(interaction);
+    }
+    
+    // Handle modal submissions
+    else if (interaction.isModalSubmit()) {
+      const command = client.commands.get(interaction.customId.split('_')[0]);
+      if (!command || !command.handleModal) return;
+      
+      await command.handleModal(interaction);
+    }
+    
   } catch (error) {
-    await ErrorHandler.handle(error, interaction);
-  }
-});
-
-// Modal Interaction Handler
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isModalSubmit()) return;
-  
-  const command = client.commands.get(interaction.customId.split('_')[0]);
-  if (!command || !command.handleModal) return;
-  
-  try {
-    await command.handleModal(interaction);
-  } catch (error) {
-    await ErrorHandler.handle(error, interaction);
-  }
-});
-
-// Button Interaction Handler
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isButton()) return;
-  
-  const [commandName] = interaction.customId.split('_');
-  const command = client.commands.get(commandName);
-  if (!command || !command.handleButton) return;
-  
-  try {
-    await command.handleButton(interaction);
-  } catch (error) {
+    console.error('Interaction error:', error);
     await ErrorHandler.handle(error, interaction);
   }
 });
