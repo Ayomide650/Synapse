@@ -234,131 +234,143 @@ module.exports = {
   },
 
   async handleButton(interaction) {
-    const { customId, user, message } = interaction;
-    
-    if (customId === 'giveaway_setup') {
-      const modal = new ModalBuilder()
-        .setCustomId('giveaway_create')
-        .setTitle('Create Giveaway');
+    try {
+      const { customId, user, message } = interaction;
       
-      const prizeInput = new TextInputBuilder()
-        .setCustomId('prize')
-        .setLabel('Prize')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(100);
-      
-      const durationInput = new TextInputBuilder()
-        .setCustomId('duration')
-        .setLabel('End Time (e.g., 5:30PM)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder('Format: 5:30PM or 11:45AM');
-      
-      const winnersInput = new TextInputBuilder()
-        .setCustomId('winners')
-        .setLabel('Number of Winners')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder('Enter a number');
-      
-      const descriptionInput = new TextInputBuilder()
-        .setCustomId('description')
-        .setLabel('Description (Optional)')
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(false)
-        .setMaxLength(500);
-      
-      const firstRow = new ActionRowBuilder().addComponents(prizeInput);
-      const secondRow = new ActionRowBuilder().addComponents(durationInput);
-      const thirdRow = new ActionRowBuilder().addComponents(winnersInput);
-      const fourthRow = new ActionRowBuilder().addComponents(descriptionInput);
-      
-      modal.addComponents(firstRow, secondRow, thirdRow, fourthRow);
-      
-      await interaction.showModal(modal);
-      return;
-    }
-    
-    if (customId.startsWith('giveaway_participate_')) {
-      const giveawayId = customId.split('_')[2];
-      const giveaway = activeGiveaways.get(giveawayId);
-      
-      if (!giveaway) {
-        await interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
+      if (customId === 'giveaway_setup') {
+        const modal = new ModalBuilder()
+          .setCustomId('giveaway_create')
+          .setTitle('Create Giveaway');
+        
+        const prizeInput = new TextInputBuilder()
+          .setCustomId('prize')
+          .setLabel('Prize')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(100);
+        
+        const durationInput = new TextInputBuilder()
+          .setCustomId('duration')
+          .setLabel('End Time (e.g., 5:30PM)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder('Format: 5:30PM or 11:45AM');
+        
+        const winnersInput = new TextInputBuilder()
+          .setCustomId('winners')
+          .setLabel('Number of Winners')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder('Enter a number');
+        
+        const descriptionInput = new TextInputBuilder()
+          .setCustomId('description')
+          .setLabel('Description (Optional)')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setMaxLength(500);
+        
+        const firstRow = new ActionRowBuilder().addComponents(prizeInput);
+        const secondRow = new ActionRowBuilder().addComponents(durationInput);
+        const thirdRow = new ActionRowBuilder().addComponents(winnersInput);
+        const fourthRow = new ActionRowBuilder().addComponents(descriptionInput);
+        
+        modal.addComponents(firstRow, secondRow, thirdRow, fourthRow);
+        
+        await interaction.showModal(modal);
         return;
       }
       
-      if (giveaway.participants.includes(user.id)) {
-        await interaction.reply({ content: 'You are already participating in this giveaway!', ephemeral: true });
+      if (customId.startsWith('giveaway_participate_')) {
+        const giveawayId = customId.split('_')[2];
+        const giveaway = activeGiveaways.get(giveawayId);
+        
+        if (!giveaway) {
+          await interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
+          return;
+        }
+        
+        if (giveaway.participants.includes(user.id)) {
+          await interaction.reply({ content: 'You are already participating in this giveaway!', ephemeral: true });
+          return;
+        }
+        
+        giveaway.participants.push(user.id);
+        
+        // Update the embed with new participant count
+        const embed = new EmbedBuilder()
+          .setTitle('🎉 Giveaway Active')
+          .setDescription(`**Prize:** ${giveaway.prize}\n${giveaway.description ? `**Description:** ${giveaway.description}\n` : ''}\n**Winners:** ${giveaway.winners}\n**Participants:** ${giveaway.participants.length}\n**Ends:** ${formatEndTime(giveaway.endTime)}`)
+          .setColor('#00ff00')
+          .setTimestamp();
+        
+        const participateButton = new ButtonBuilder()
+          .setCustomId(`giveaway_participate_${giveawayId}`)
+          .setLabel('🎁 Participate')
+          .setStyle(ButtonStyle.Primary);
+        
+        const endButton = new ButtonBuilder()
+          .setCustomId(`giveaway_end_${giveawayId}`)
+          .setLabel('END')
+          .setStyle(ButtonStyle.Danger);
+        
+        const row = new ActionRowBuilder().addComponents(participateButton, endButton);
+        
+        await message.edit({ embeds: [embed], components: [row] });
+        await interaction.reply({ content: 'You have successfully joined the giveaway! Good luck! 🍀', ephemeral: true });
         return;
       }
       
-      giveaway.participants.push(user.id);
-      
-      // Update the embed with new participant count
-      const embed = new EmbedBuilder()
-        .setTitle('🎉 Giveaway Active')
-        .setDescription(`**Prize:** ${giveaway.prize}\n${giveaway.description ? `**Description:** ${giveaway.description}\n` : ''}\n**Winners:** ${giveaway.winners}\n**Participants:** ${giveaway.participants.length}\n**Ends:** ${formatEndTime(giveaway.endTime)}`)
-        .setColor('#00ff00')
-        .setTimestamp();
-      
-      const participateButton = new ButtonBuilder()
-        .setCustomId(`giveaway_participate_${giveawayId}`)
-        .setLabel('🎁 Participate')
-        .setStyle(ButtonStyle.Primary);
-      
-      const endButton = new ButtonBuilder()
-        .setCustomId(`giveaway_end_${giveawayId}`)
-        .setLabel('END')
-        .setStyle(ButtonStyle.Danger);
-      
-      const row = new ActionRowBuilder().addComponents(participateButton, endButton);
-      
-      await message.edit({ embeds: [embed], components: [row] });
-      await interaction.reply({ content: 'You have successfully joined the giveaway! Good luck! 🍀', ephemeral: true });
-      return;
-    }
-    
-    if (customId.startsWith('giveaway_end_')) {
-      const giveawayId = customId.split('_')[2];
-      const giveaway = activeGiveaways.get(giveawayId);
-      
-      if (!giveaway) {
-        await interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
+      if (customId.startsWith('giveaway_end_')) {
+        const giveawayId = customId.split('_')[2];
+        const giveaway = activeGiveaways.get(giveawayId);
+        
+        if (!giveaway) {
+          await interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
+          return;
+        }
+        
+        // Check if user has permission to end giveaway
+        if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+          await interaction.reply({ content: 'You do not have permission to end this giveaway.', ephemeral: true });
+          return;
+        }
+        
+        // End without winners
+        const embed = new EmbedBuilder()
+          .setTitle('🎉 Giveaway Ended')
+          .setDescription(`**Prize:** ${giveaway.prize}\n\n❌ Giveaway ended by administrator with no winners.`)
+          .setColor('#ff0000')
+          .setTimestamp();
+        
+        await message.edit({ embeds: [embed], components: [] });
+        activeGiveaways.delete(giveawayId);
+        
+        await interaction.reply({ content: 'Giveaway ended with no winners.', ephemeral: true });
         return;
       }
+    } catch (error) {
+      console.error('Error in giveaway handleButton:', error);
       
-      // Check if user has permission to end giveaway
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        await interaction.reply({ content: 'You do not have permission to end this giveaway.', ephemeral: true });
-        return;
+      const errorMessage = 'There was an error processing your request. Please try again.';
+      
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: errorMessage, ephemeral: true });
+      } else {
+        await interaction.reply({ content: errorMessage, ephemeral: true });
       }
-      
-      // End without winners
-      const embed = new EmbedBuilder()
-        .setTitle('🎉 Giveaway Ended')
-        .setDescription(`**Prize:** ${giveaway.prize}\n\n❌ Giveaway ended by administrator with no winners.`)
-        .setColor('#ff0000')
-        .setTimestamp();
-      
-      await message.edit({ embeds: [embed], components: [] });
-      activeGiveaways.delete(giveawayId);
-      
-      await interaction.reply({ content: 'Giveaway ended with no winners.', ephemeral: true });
-      return;
     }
   },
 
   async handleModal(interaction) {
-    if (interaction.customId !== 'giveaway_create') return;
-    
-    const prize = interaction.fields.getTextInputValue('prize');
-    const duration = interaction.fields.getTextInputValue('duration');
-    const winners = parseInt(interaction.fields.getTextInputValue('winners'));
-    const description = interaction.fields.getTextInputValue('description') || null;
-    
     try {
+      if (interaction.customId !== 'giveaway_create') return;
+      
+      const prize = interaction.fields.getTextInputValue('prize');
+      const duration = interaction.fields.getTextInputValue('duration');
+      const winners = parseInt(interaction.fields.getTextInputValue('winners'));
+      const description = interaction.fields.getTextInputValue('description') || null;
+      
       // Validate inputs
       if (isNaN(winners) || winners < 1) {
         throw new Error('Number of winners must be a positive number.');
@@ -419,6 +431,7 @@ module.exports = {
       });
       
     } catch (error) {
+      console.error('Error in giveaway handleModal:', error);
       await interaction.reply({ content: `❌ Error: ${error.message}`, ephemeral: true });
     }
   }
