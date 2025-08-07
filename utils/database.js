@@ -45,8 +45,8 @@ class Database {
       const filePath = path.join(this.dataPath, fileName);
       const jsonData = JSON.stringify(data, null, 2);
       
-      // Create backup before writing
-      await this.createBackup(fileName);
+      // Only create backup if file exists
+      await this.createBackupIfExists(fileName);
       
       // Atomic write using temporary file
       const tempPath = `${filePath}.tmp`;
@@ -63,18 +63,28 @@ class Database {
     }
   }
 
-  async createBackup(fileName) {
+  async createBackupIfExists(fileName) {
     try {
       const sourcePath = path.join(this.dataPath, fileName);
+      
+      // Check if source file exists before trying to backup
+      try {
+        await fs.access(sourcePath);
+      } catch (error) {
+        // File doesn't exist, skip backup silently
+        return;
+      }
+      
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const backupFile = `${fileName}.${timestamp}.bak`;
       const backupPath = path.join(this.backupPath, backupFile);
-
+      
       await fs.copyFile(sourcePath, backupPath);
-
+      
       // Clean old backups (keep last 5)
       const backups = await fs.readdir(this.backupPath);
       const fileBackups = backups.filter(f => f.startsWith(fileName));
+      
       if (fileBackups.length > 5) {
         const oldBackups = fileBackups
           .sort()
@@ -85,8 +95,14 @@ class Database {
         }
       }
     } catch (error) {
-      console.error('Error creating backup:', error);
+      // Only log backup errors, don't fail the write operation
+      console.log(`Backup skipped for ${fileName} (file may not exist yet)`);
     }
+  }
+
+  // Keep the old method for backward compatibility
+  async createBackup(fileName) {
+    return this.createBackupIfExists(fileName);
   }
 
   async delete(fileName) {
