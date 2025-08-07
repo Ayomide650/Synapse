@@ -1,13 +1,5 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-
-const DATA_PATH = path.join(__dirname, '../data/antilink.json');
-
-// Initialize antilink data
-if (!fs.existsSync(DATA_PATH)) {
-  fs.writeFileSync(DATA_PATH, JSON.stringify({ channels: {} }));
-}
+const database = require('../database/database'); // Adjust path as needed
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -40,30 +32,43 @@ module.exports = {
   async execute(interaction) {
     try {
       const subcommand = interaction.options.getSubcommand();
-      const data = JSON.parse(fs.readFileSync(DATA_PATH));
+      
+      // Read current antilink data from database
+      let data = await database.read('antilink.json');
+      if (!data) {
+        data = { channels: {} };
+      }
 
       switch (subcommand) {
         case 'enable': {
           const channel = interaction.options.getChannel('channel');
           data.channels[channel.id] = true;
-          fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2));
-
-          await interaction.reply({
-            content: `✅ Link protection enabled in ${channel}`,
-            ephemeral: true
-          });
+          
+          const success = await database.write('antilink.json', data);
+          if (success) {
+            await interaction.reply({
+              content: `✅ Link protection enabled in ${channel}`,
+              ephemeral: true
+            });
+          } else {
+            throw new Error('Failed to save to database');
+          }
           break;
         }
 
         case 'disable': {
           const channel = interaction.options.getChannel('channel');
           delete data.channels[channel.id];
-          fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2));
-
-          await interaction.reply({
-            content: `✅ Link protection disabled in ${channel}`,
-            ephemeral: true
-          });
+          
+          const success = await database.write('antilink.json', data);
+          if (success) {
+            await interaction.reply({
+              content: `✅ Link protection disabled in ${channel}`,
+              ephemeral: true
+            });
+          } else {
+            throw new Error('Failed to save to database');
+          }
           break;
         }
 
@@ -71,7 +76,7 @@ module.exports = {
           const channels = Object.keys(data.channels)
             .map(id => `<#${id}>`)
             .join('\n') || 'No channels with link protection';
-
+          
           await interaction.reply({
             content: `**Channels with Link Protection:**\n${channels}`,
             ephemeral: true
@@ -84,7 +89,7 @@ module.exports = {
       await interaction.reply({
         content: '❌ Failed to manage link protection. Please try again.',
         ephemeral: true
-      });
+      }).catch(() => {}); // Ignore if already replied
     }
   },
 
@@ -92,12 +97,13 @@ module.exports = {
   async handleMessage(message) {
     try {
       if (message.author.bot) return;
-
-      const data = JSON.parse(fs.readFileSync(DATA_PATH));
-      if (!data.channels[message.channel.id]) return;
+      
+      // Read antilink data from database
+      const data = await database.read('antilink.json');
+      if (!data || !data.channels[message.channel.id]) return;
 
       // Skip if user is admin
-      if (message.member.permissions.has(PermissionFlagsBits.Administrator)) return;
+      if (message.member?.permissions?.has(PermissionFlagsBits.Administrator)) return;
 
       // Link detection regex
       const linkRegex = /(https?:\/\/[^\s]+)|(www\.[^\s]+)|discord\.gg\/[a-zA-Z0-9]+/gi;
