@@ -7,6 +7,11 @@ async function setupDatabase() {
   console.log('🗄️ Setting up initial database files...');
 
   try {
+    // Wait for database to initialize before using it
+    console.log('⏳ Initializing database connection...');
+    await database.initialize();
+    console.log('✅ Database initialized successfully');
+
     // 1. Users database - for economy, leveling, and user data
     const initialUsers = {
       "meta": {
@@ -126,12 +131,25 @@ async function setupDatabase() {
       { name: 'settings.json', data: initialSettings }
     ];
 
+    console.log('📝 Creating database files...');
+    
     for (const db of databases) {
-      const success = await database.write(db.name, db.data);
-      if (success) {
-        console.log(`✅ Created ${db.name}`);
-      } else {
-        console.log(`❌ Failed to create ${db.name}`);
+      try {
+        // Check if file already exists to avoid overwriting
+        const existing = await database.read(db.name);
+        if (existing) {
+          console.log(`⚠️  ${db.name} already exists - skipping`);
+          continue;
+        }
+
+        const success = await database.write(db.name, db.data);
+        if (success) {
+          console.log(`✅ Created ${db.name}`);
+        } else {
+          console.log(`❌ Failed to create ${db.name}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error creating ${db.name}:`, error.message);
       }
     }
 
@@ -146,15 +164,29 @@ async function setupDatabase() {
 
   } catch (error) {
     console.error('❌ Error setting up database:', error);
+    throw error; // Re-throw to prevent silent failures
   }
 }
 
 // Helper functions for your Discord bot commands
 class DatabaseHelper {
   
+  // Ensure database is initialized before any operation
+  static async ensureInitialized() {
+    if (!database.isInitialized) {
+      await database.initialize();
+    }
+  }
+  
   // User management
   static async getUser(userId, guildId = null) {
+    await this.ensureInitialized();
+    
     const userData = await database.read('users.json');
+    if (!userData) {
+      throw new Error('Users database not found. Run setup first.');
+    }
+    
     const key = guildId ? `${userId}_${guildId}` : userId;
     
     if (!userData.users[key]) {
@@ -169,6 +201,7 @@ class DatabaseHelper {
         createdAt: new Date().toISOString()
       };
       userData.meta.totalUsers++;
+      userData.meta.lastUpdated = new Date().toISOString();
       await database.write('users.json', userData);
     }
     
@@ -176,7 +209,13 @@ class DatabaseHelper {
   }
 
   static async updateUser(userId, updates, guildId = null) {
+    await this.ensureInitialized();
+    
     const userData = await database.read('users.json');
+    if (!userData) {
+      throw new Error('Users database not found. Run setup first.');
+    }
+    
     const key = guildId ? `${userId}_${guildId}` : userId;
     
     if (userData.users[key]) {
@@ -226,7 +265,12 @@ class DatabaseHelper {
 
   // Guild settings
   static async getGuildSettings(guildId) {
+    await this.ensureInitialized();
+    
     const guildsData = await database.read('guilds.json');
+    if (!guildsData) {
+      throw new Error('Guilds database not found. Run setup first.');
+    }
     
     if (!guildsData.guilds[guildId]) {
       guildsData.guilds[guildId] = {
@@ -238,6 +282,7 @@ class DatabaseHelper {
         createdAt: new Date().toISOString()
       };
       guildsData.meta.totalGuilds++;
+      guildsData.meta.lastUpdated = new Date().toISOString();
       await database.write('guilds.json', guildsData);
     }
     
@@ -246,7 +291,13 @@ class DatabaseHelper {
 
   // Moderation functions
   static async addWarning(userId, guildId, moderatorId, reason) {
+    await this.ensureInitialized();
+    
     const modData = await database.read('moderation.json');
+    if (!modData) {
+      throw new Error('Moderation database not found. Run setup first.');
+    }
+    
     const key = `${userId}_${guildId}`;
     
     if (!modData.warnings[key]) {
@@ -260,6 +311,7 @@ class DatabaseHelper {
       timestamp: new Date().toISOString()
     });
     
+    modData.meta.lastUpdated = new Date().toISOString();
     await database.write('moderation.json', modData);
     return modData.warnings[key].length; // Return warning count
   }
@@ -273,5 +325,8 @@ module.exports = {
 
 // Run setup if this file is executed directly
 if (require.main === module) {
-  setupDatabase();
+  setupDatabase().catch(error => {
+    console.error('Setup failed:', error);
+    process.exit(1);
+  });
 }
