@@ -1,12 +1,46 @@
 const { SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const database = require('../utils/database'); // Import your database utility
 
 const DATA_PATH = path.join(__dirname, '../data/levels.json');
 const XP_LOGS_CHANNEL = process.env.XP_LOGS_CHANNEL;
 
 function calculateLevel(messages) {
   return Math.floor(Math.sqrt(messages / 5));
+}
+
+// Function to check and assign level roles
+async function checkLevelRoles(interaction, userId, newLevel, oldLevel) {
+  try {
+    const levelingData = await database.read('leveling.json');
+    if (!levelingData?.levelRoles) return [];
+
+    const member = await interaction.guild.members.fetch(userId);
+    let rolesAssigned = [];
+
+    // Check all levels from oldLevel+1 to newLevel
+    for (let level = oldLevel + 1; level <= newLevel; level++) {
+      const roleId = levelingData.levelRoles[level.toString()];
+      if (roleId) {
+        try {
+          const role = await interaction.guild.roles.fetch(roleId);
+          if (role && !member.roles.cache.has(roleId)) {
+            await member.roles.add(role);
+            rolesAssigned.push({ level, role: role.name });
+            console.log(`Assigned role ${role.name} to ${member.user.tag} for level ${level}`);
+          }
+        } catch (error) {
+          console.log(`Failed to assign role for level ${level}:`, error.message);
+        }
+      }
+    }
+
+    return rolesAssigned;
+  } catch (error) {
+    console.error('Error checking level roles:', error);
+    return [];
+  }
 }
 
 module.exports = {
@@ -19,6 +53,7 @@ module.exports = {
       option.setName('amount').setDescription('Amount of XP to add').setRequired(true))
     .addStringOption(option =>
       option.setName('reason').setDescription('Reason for adding XP').setRequired(true)),
+
   async execute(interaction) {
     if (!interaction.member.permissions.has('Administrator')) {
       return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
@@ -50,31 +85,54 @@ module.exports = {
     fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2));
 
     await interaction.reply({ 
-      content: `Added ${amount} XP to ${targetUser.tag}. New total: ${userData.xp} XP`,
+      content: `✅ Added ${amount} XP to ${targetUser.tag}. New total: ${userData.xp} XP`,
       ephemeral: true 
     });
 
+    // Check for level up and assign roles
     if (newLevel > oldLevel) {
-      interaction.channel.send(`🎉 ${targetUser} has reached level ${newLevel}!`);
+      // Send level up message
+      await interaction.followUp(`🎉 ${targetUser} has reached level ${newLevel}!`);
+      
+      // Check for role rewards
+      const rolesAssigned = await checkLevelRoles(interaction, targetUser.id, newLevel, oldLevel);
+      
+      // Send role reward messages
+      if (rolesAssigned.length > 0) {
+        const roleNames = rolesAssigned.map(r => `**${r.role}** (Level ${r.level})`).join(', ');
+        await interaction.followUp(`🏆 **New Role Rewards for ${targetUser.tag}:** ${roleNames}`);
+      }
     }
 
+    // Send to XP logs channel
     if (XP_LOGS_CHANNEL) {
       const logsChannel = interaction.guild.channels.cache.get(XP_LOGS_CHANNEL);
       if (logsChannel) {
-        logsChannel.send({
-          embeds: [{
-            title: 'XP Added',
-            description: `${interaction.user.tag} added XP to ${targetUser.tag}`,
-            fields: [
-              { name: 'Amount', value: amount.toString() },
-              { name: 'Reason', value: reason },
-              { name: 'New Total', value: userData.xp.toString() },
-              { name: 'Level', value: `${oldLevel} → ${newLevel}` }
-            ],
-            color: 0x00ff00,
-            timestamp: new Date()
-          }]
-        });
+        const embed = {
+          title: 'XP Added',
+          description: `${interaction.user.tag} added XP to ${targetUser.tag}`,
+          fields: [
+            { name: 'Amount', value: amount.toString() },
+            { name: 'Reason', value: reason },
+            { name: 'New Total', value: userData.xp.toString() },
+            { name: 'Level', value: `${oldLevel} → ${newLevel}` }
+          ],
+          color: 0x00ff00,
+          timestamp: new Date()
+        };
+
+        // Add roles field if any were assigned
+        if (newLevel > oldLevel) {
+          const rolesAssigned = await checkLevelRoles(interaction, targetUser.id, newLevel, oldLevel);
+          if (rolesAssigned.length > 0) {
+            embed.fields.push({
+              name: '🏆 Roles Assigned',
+              value: rolesAssigned.map(r => `${r.role} (Level ${r.level})`).join('\n')
+            });
+          }
+        }
+
+        logsChannel.send({ embeds: [embed] });
       }
     }
   }
