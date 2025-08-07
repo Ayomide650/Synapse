@@ -8,8 +8,19 @@ async function setupDatabase() {
 
   try {
     // Wait for database to initialize before using it
-    console.log('⏳ Initializing database connection...');
-    await database.initialize();
+    console.log('⏳ Waiting for database to initialize...');
+    
+    // Wait for database to be ready (it auto-initializes)
+    let attempts = 0;
+    while (!database.isInitialized && attempts < 30) {
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+      attempts++;
+    }
+    
+    if (!database.isInitialized) {
+      throw new Error('Database failed to initialize after 30 seconds');
+    }
+    
     console.log('✅ Database initialized successfully');
 
     // 1. Users database - for economy, leveling, and user data
@@ -173,8 +184,15 @@ class DatabaseHelper {
   
   // Ensure database is initialized before any operation
   static async ensureInitialized() {
+    // Wait for database to be ready (it auto-initializes)
+    let attempts = 0;
+    while (!database.isInitialized && attempts < 10) {
+      await new Promise(resolve => setTimeout(resolve, 500)); // Wait 0.5 seconds
+      attempts++;
+    }
+    
     if (!database.isInitialized) {
-      await database.initialize();
+      throw new Error('Database not ready. Please wait for initialization.');
     }
   }
   
