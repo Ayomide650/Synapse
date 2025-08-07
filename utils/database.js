@@ -1,5 +1,6 @@
 const fs = require('fs').promises;
 const path = require('path');
+const axios = require('axios');
 const config = require('../config/config');
 
 class Database {
@@ -11,8 +12,15 @@ class Database {
       ? config.getCurrentConfig() 
       : config;
     
-    this.dataPath = path.join(process.cwd(), currentConfig.dataPath);
-    this.backupPath = path.join(process.cwd(), currentConfig.backupPath);
+    // GitHub configuration
+    this.githubToken = process.env.GITHUB_TOKEN;
+    this.githubOwner = 'Ayomide650';
+    this.githubRepo = 'my-bot-data';
+    this.githubApiBase = 'https://api.github.com';
+    
+    // Local paths for temporary storage and caching
+    this.dataPath = path.join(process.cwd(), 'temp_data');
+    this.backupPath = path.join(process.cwd(), 'temp_backups');
     this.configPath = path.join(process.cwd(), 'db.config.json');
     this.metadataPath = path.join(this.dataPath, '.metadata.json');
     this.isInitialized = false;
@@ -22,6 +30,13 @@ class Database {
     this.maxBackups = currentConfig.maxBackups || 10;
     this.maxCacheSize = currentConfig.maxCacheSize || 1000;
     
+    // GitHub API headers
+    this.githubHeaders = {
+      'Authorization': `token ${this.githubToken}`,
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'SynapseBot-Storage'
+    };
+    
     // Auto-initialize on startup
     this.initialize();
   }
@@ -30,29 +45,143 @@ class Database {
     if (this.isInitialized) return;
     
     try {
-      // Create directories
+      // Verify GitHub token
+      if (!this.githubToken) {
+        throw new Error('GITHUB_TOKEN environment variable is required');
+      }
+      
+      // Test GitHub connection
+      await this.testGitHubConnection();
+      
+      // Create local temp directories
       await fs.mkdir(this.dataPath, { recursive: true });
       await fs.mkdir(this.backupPath, { recursive: true });
       
       // Load or create persistent configuration
       await this.loadOrCreateConfig();
       
+      // Sync data from GitHub
+      await this.syncFromGitHub();
+      
       // Load metadata for tracking database state
       await this.loadMetadata();
       
-      // Restore cache from last session if enabled
-      if (this.config.persistCache) {
-        await this.restoreCache();
-      }
-      
       this.isInitialized = true;
       console.log('Database initialized successfully');
-      console.log(`Data path: ${this.dataPath}`);
-      console.log(`Cache enabled: ${this.config.persistCache ? 'Yes' : 'No'}`);
+      console.log(`GitHub repo: ${this.githubOwner}/${this.githubRepo}`);
+      console.log(`Local cache enabled: ${this.config.persistCache ? 'Yes' : 'No'}`);
       console.log(`Compression enabled: ${this.compressionEnabled ? 'Yes' : 'No'}`);
       
     } catch (error) {
       console.error('Error initializing database:', error);
+      throw error;
+    }
+  }
+
+  async testGitHubConnection() {
+    try {
+      const response = await axios.get(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}`,
+        { headers: this.githubHeaders }
+      );
+      console.log('GitHub connection successful');
+      return true;
+    } catch (error) {
+      if (error.response?.status === 404) {
+        throw new Error(`Repository ${this.githubOwner}/${this.githubRepo} not found or no access`);
+      }
+      throw new Error(`GitHub connection failed: ${error.message}`);
+    }
+  }
+
+  async syncFromGitHub() {
+    try {
+      console.log('Syncing data from GitHub...');
+      
+      // Get all files from the data directory in GitHub
+      const response = await axios.get(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/data`,
+        { headers: this.githubHeaders }
+      );
+      
+      const files = response.data;
+      let syncCount = 0;
+      
+      for (const file of files) {
+        if (file.type === 'file' && file.name.endsWith('.json')) {
+          const content = await this.downloadFromGitHub(`data/${file.name}`);
+          if (content) {
+            // Save to local cache
+            const localPath = path.join(this.dataPath, file.name);
+            await fs.writeFile(localPath, JSON.stringify(content, null, 2));
+            
+            // Cache in memory
+            this.setCacheItem(file.name, {
+              data: content,
+              timestamp: Date.now(),
+              sha: file.sha
+            });
+            
+            syncCount++;
+          }
+        }
+      }
+      
+      console.log(`Synced ${syncCount} files from GitHub`);
+      
+    } catch (error) {
+      if (error.response?.status === 404) {
+        console.log('No existing data directory in GitHub repo - starting fresh');
+      } else {
+        console.error('Error syncing from GitHub:', error.message);
+      }
+    }
+  }
+
+  async downloadFromGitHub(filePath) {
+    try {
+      const response = await axios.get(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/${filePath}`,
+        { headers: this.githubHeaders }
+      );
+      
+      // GitHub returns base64 encoded content
+      const content = Buffer.from(response.data.content, 'base64').toString('utf8');
+      return JSON.parse(content);
+      
+    } catch (error) {
+      if (error.response?.status === 404) {
+        return null; // File doesn't exist
+      }
+      throw error;
+    }
+  }
+
+  async uploadToGitHub(fileName, data, sha = null) {
+    try {
+      const filePath = `data/${fileName}`;
+      const content = Buffer.from(JSON.stringify(data, null, this.compressionEnabled ? 0 : 2)).toString('base64');
+      
+      const payload = {
+        message: `Update ${fileName}`,
+        content: content
+      };
+      
+      // If we have the SHA, include it for updates
+      if (sha) {
+        payload.sha = sha;
+      }
+      
+      const response = await axios.put(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/${filePath}`,
+        payload,
+        { headers: this.githubHeaders }
+      );
+      
+      return response.data.content.sha;
+      
+    } catch (error) {
+      console.error(`Error uploading ${fileName} to GitHub:`, error.message);
       throw error;
     }
   }
@@ -75,7 +204,8 @@ class Database {
         compressionLevel: currentConfig.database?.compressionLevel || 6,
         maxFileSize: currentConfig.maxFileSize || 10 * 1024 * 1024, // 10MB per file
         created: new Date().toISOString(),
-        lastStartup: new Date().toISOString()
+        lastStartup: new Date().toISOString(),
+        githubSync: true
       };
       await this.saveConfig();
     }
@@ -102,6 +232,7 @@ class Database {
         totalFiles: 0,
         totalSize: 0,
         lastCleanup: null,
+        lastGitHubSync: null,
         fileRegistry: {}
       };
       await this.saveMetadata();
@@ -116,115 +247,69 @@ class Database {
     }
   }
 
-  async restoreCache() {
-    try {
-      const cacheFile = path.join(this.dataPath, '.cache.json');
-      const cacheData = await fs.readFile(cacheFile, 'utf8');
-      const savedCache = JSON.parse(cacheData);
-      
-      // Restore cache with size limit
-      let count = 0;
-      for (const [key, value] of Object.entries(savedCache)) {
-        if (count >= this.maxCacheSize) break;
-        this.cache.set(key, value);
-        count++;
-      }
-      
-      console.log(`Restored ${count} items to cache`);
-    } catch (error) {
-      console.log('No previous cache found or error restoring cache');
-    }
-  }
-
-  async persistCache() {
-    if (!this.config.persistCache) return;
-    
-    try {
-      const cacheFile = path.join(this.dataPath, '.cache.json');
-      const cacheObj = Object.fromEntries(this.cache);
-      await fs.writeFile(cacheFile, JSON.stringify(cacheObj, null, 2));
-    } catch (error) {
-      console.error('Error persisting cache:', error);
-    }
-  }
-
-  // Enhanced read with better caching
+  // Enhanced read with GitHub sync
   async read(fileName) {
     await this.initialize();
     
     try {
-      const filePath = path.join(this.dataPath, fileName);
-      
-      // Return cached data if available and not expired
+      // Check cache first
       if (this.cache.has(fileName)) {
         const cached = this.cache.get(fileName);
-        // Simple cache invalidation based on file modification time
-        try {
-          const stats = await fs.stat(filePath);
-          if (cached.timestamp >= stats.mtime.getTime()) {
-            return cached.data;
-          }
-        } catch (e) {
-          // File might not exist, remove from cache
-          this.cache.delete(fileName);
-        }
+        return cached.data;
       }
 
-      const data = await fs.readFile(filePath, 'utf8');
-      const parsed = this.parseData(data);
+      // Try to read from GitHub
+      const data = await this.downloadFromGitHub(`data/${fileName}`);
       
-      // Cache with timestamp
-      this.setCacheItem(fileName, {
-        data: parsed,
-        timestamp: Date.now()
-      });
+      if (data) {
+        // Cache the data
+        this.setCacheItem(fileName, {
+          data: data,
+          timestamp: Date.now()
+        });
+        
+        return data;
+      }
       
-      return parsed;
+      return null; // File doesn't exist
       
     } catch (error) {
-      if (error.code === 'ENOENT') {
-        return null;
-      }
-      throw error;
+      console.error(`Error reading ${fileName}:`, error.message);
+      return null;
     }
   }
 
-  // Enhanced write with compression and size management
+  // Enhanced write with GitHub sync
   async write(fileName, data) {
     await this.initialize();
     
     try {
-      const filePath = path.join(this.dataPath, fileName);
-      let jsonData = this.stringifyData(data);
-      
-      // Check file size limit
-      if (jsonData.length > this.config.maxFileSize) {
-        console.warn(`Warning: File ${fileName} exceeds size limit`);
-        // Could implement file splitting here if needed
+      // Get current SHA if file exists
+      let currentSha = null;
+      const cached = this.cache.get(fileName);
+      if (cached && cached.sha) {
+        currentSha = cached.sha;
       }
       
-      // Create backup if file exists and auto backup is enabled
-      if (this.config.autoBackup) {
-        await this.createBackupIfExists(fileName);
-      }
+      // Upload to GitHub
+      const newSha = await this.uploadToGitHub(fileName, data, currentSha);
       
-      // Atomic write using temporary file
-      const tempPath = `${filePath}.tmp`;
-      await fs.writeFile(tempPath, jsonData);
-      await fs.rename(tempPath, filePath);
-      
-      // Update cache
+      // Update local cache
       this.setCacheItem(fileName, {
         data: data,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        sha: newSha
       });
       
+      // Save locally as backup
+      const localPath = path.join(this.dataPath, fileName);
+      await fs.writeFile(localPath, JSON.stringify(data, null, 2));
+      
       // Update metadata
+      const jsonData = JSON.stringify(data);
       await this.updateFileMetadata(fileName, jsonData.length);
       
-      // Persist cache periodically
-      await this.persistCache();
-      
+      console.log(`Successfully wrote ${fileName} to GitHub`);
       return true;
       
     } catch (error) {
@@ -270,24 +355,22 @@ class Database {
     };
     
     this.metadata.totalSize += size;
+    this.metadata.lastGitHubSync = new Date().toISOString();
     await this.saveMetadata();
   }
 
   async createBackupIfExists(fileName) {
     try {
-      const sourcePath = path.join(this.dataPath, fileName);
+      // Check if file exists in GitHub
+      const existingData = await this.downloadFromGitHub(`data/${fileName}`);
+      if (!existingData) return; // File doesn't exist
       
-      try {
-        await fs.access(sourcePath);
-      } catch (error) {
-        return; // File doesn't exist
-      }
-      
+      // Create backup in GitHub
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const backupFile = `${fileName}.${timestamp}.bak`;
-      const backupPath = path.join(this.backupPath, backupFile);
+      const backupFileName = `${fileName}.${timestamp}.bak`;
       
-      await fs.copyFile(sourcePath, backupPath);
+      await this.uploadToGitHub(`backups/${backupFileName}`, existingData);
+      console.log(`Created backup: ${backupFileName}`);
       
       // Enhanced backup cleanup
       await this.cleanupBackups(fileName);
@@ -299,23 +382,38 @@ class Database {
 
   async cleanupBackups(fileName) {
     try {
-      const backups = await fs.readdir(this.backupPath);
-      const fileBackups = backups
-        .filter(f => f.startsWith(fileName))
-        .sort()
-        .reverse(); // Most recent first
+      // Get all backup files from GitHub
+      const response = await axios.get(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/backups`,
+        { headers: this.githubHeaders }
+      );
       
-      if (fileBackups.length > this.maxBackups) {
-        const oldBackups = fileBackups.slice(this.maxBackups);
+      const backups = response.data
+        .filter(file => file.name.startsWith(fileName) && file.name.endsWith('.bak'))
+        .sort((a, b) => b.name.localeCompare(a.name)); // Sort by name (newest first)
+      
+      if (backups.length > this.maxBackups) {
+        const oldBackups = backups.slice(this.maxBackups);
         
         for (const backup of oldBackups) {
-          await fs.unlink(path.join(this.backupPath, backup));
+          await axios.delete(
+            `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/backups/${backup.name}`,
+            {
+              headers: this.githubHeaders,
+              data: {
+                message: `Delete old backup: ${backup.name}`,
+                sha: backup.sha
+              }
+            }
+          );
         }
         
         console.log(`Cleaned up ${oldBackups.length} old backups for ${fileName}`);
       }
     } catch (error) {
-      console.error('Error cleaning up backups:', error);
+      if (error.response?.status !== 404) {
+        console.error('Error cleaning up backups:', error);
+      }
     }
   }
 
@@ -323,9 +421,33 @@ class Database {
     await this.initialize();
     
     try {
-      const filePath = path.join(this.dataPath, fileName);
-      await fs.unlink(filePath);
+      // Get file SHA from GitHub
+      const response = await axios.get(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/data/${fileName}`,
+        { headers: this.githubHeaders }
+      );
+      
+      // Delete from GitHub
+      await axios.delete(
+        `${this.githubApiBase}/repos/${this.githubOwner}/${this.githubRepo}/contents/data/${fileName}`,
+        {
+          headers: this.githubHeaders,
+          data: {
+            message: `Delete ${fileName}`,
+            sha: response.data.sha
+          }
+        }
+      );
+      
+      // Remove from cache
       this.cache.delete(fileName);
+      
+      // Delete local file
+      try {
+        await fs.unlink(path.join(this.dataPath, fileName));
+      } catch (e) {
+        // Ignore if local file doesn't exist
+      }
       
       // Update metadata
       if (this.metadata.fileRegistry[fileName]) {
@@ -335,10 +457,15 @@ class Database {
         await this.saveMetadata();
       }
       
-      await this.persistCache();
+      console.log(`Successfully deleted ${fileName} from GitHub`);
       return true;
       
     } catch (error) {
+      if (error.response?.status === 404) {
+        console.log(`File ${fileName} doesn't exist in GitHub`);
+        return true; // File already doesn't exist
+      }
+      console.error(`Error deleting ${fileName}:`, error);
       return false;
     }
   }
@@ -352,7 +479,9 @@ class Database {
       totalSize: this.metadata.totalSize,
       cacheSize: this.cache.size,
       uptime: Date.now() - new Date(this.config.lastStartup).getTime(),
-      lastStartup: this.config.lastStartup
+      lastStartup: this.config.lastStartup,
+      lastGitHubSync: this.metadata.lastGitHubSync,
+      githubRepo: `${this.githubOwner}/${this.githubRepo}`
     };
     
     return stats;
@@ -361,32 +490,26 @@ class Database {
   async vacuum() {
     console.log('Starting database vacuum...');
     
+    // Sync with GitHub to get latest state
+    await this.syncFromGitHub();
+    
     // Clean up orphaned cache entries
-    const files = await fs.readdir(this.dataPath);
-    const validFiles = files.filter(f => !f.startsWith('.') && f.endsWith('.json'));
+    const validFiles = Array.from(this.cache.keys());
     
-    for (const cacheKey of this.cache.keys()) {
-      if (!validFiles.includes(cacheKey)) {
-        this.cache.delete(cacheKey);
+    // Clean up old local files
+    try {
+      const localFiles = await fs.readdir(this.dataPath);
+      for (const file of localFiles) {
+        if (file.endsWith('.json') && !validFiles.includes(file)) {
+          await fs.unlink(path.join(this.dataPath, file));
+        }
       }
-    }
-    
-    // Clean up old backups
-    const backups = await fs.readdir(this.backupPath);
-    const oneMonthAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    
-    for (const backup of backups) {
-      const backupPath = path.join(this.backupPath, backup);
-      const stats = await fs.stat(backupPath);
-      
-      if (stats.mtime.getTime() < oneMonthAgo) {
-        await fs.unlink(backupPath);
-      }
+    } catch (e) {
+      // Ignore errors
     }
     
     this.metadata.lastCleanup = new Date().toISOString();
     await this.saveMetadata();
-    await this.persistCache();
     
     console.log('Database vacuum completed');
   }
@@ -397,9 +520,6 @@ class Database {
     } else {
       this.cache.clear();
     }
-    
-    // Persist the change
-    this.persistCache();
   }
 
   // Graceful shutdown
@@ -407,7 +527,6 @@ class Database {
     console.log('Shutting down database...');
     
     try {
-      await this.persistCache();
       await this.saveMetadata();
       await this.saveConfig();
       
