@@ -11,7 +11,7 @@ if (!global.giveawayCronInitialized) {
     const now = new Date();
     
     try {
-      const allGiveaways = await db.getAll('giveaway') || {};
+      const giveaways = await db.read('giveaway');
       
       for (const [giveawayId, giveaway] of Object.entries(allGiveaways)) {
         if (giveaway && giveaway.endTime && now >= new Date(giveaway.endTime)) {
