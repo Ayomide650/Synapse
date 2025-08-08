@@ -3,7 +3,7 @@ const cron = require('node-cron');
 const Database = require('../utils/database'); // Adjust path as needed
 
 // Initialize database
-const db = new Database();
+const db = require('../database/database');
 
 // Initialize cron job when module loads
 if (!global.giveawayCronInitialized) {
