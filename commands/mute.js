@@ -1,10 +1,8 @@
 const { SlashCommandBuilder } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
 const ms = require('ms');
+const Database = require('../database/database'); // Adjust path as needed
 
 const LOG_CHANNEL_ID = process.env.SERVER_LOG_CHANNEL;
-const DATA_PATH = path.join(__dirname, '../data/moderation.json');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -20,10 +18,12 @@ module.exports = {
       option.setName('reason')
       .setDescription('Reason for mute')
       .setRequired(false)),
+
   async execute(interaction) {
     if (!interaction.member.permissions.has('ModerateMembers')) {
       return interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
     }
+
     const user = interaction.options.getUser('user');
     const durationString = interaction.options.getString('duration');
     const reason = interaction.options.getString('reason') || 'No reason provided';
@@ -32,6 +32,7 @@ module.exports = {
     if (!member) {
       return interaction.reply({ content: 'User not found in this server.', ephemeral: true });
     }
+
     if (!member.moderatable) {
       return interaction.reply({ content: 'I cannot mute this user.', ephemeral: true });
     }
@@ -45,12 +46,18 @@ module.exports = {
     }
 
     try {
+      // Initialize database instance
+      const db = new Database();
+      await db.initialize();
+
+      // Apply the timeout/mute
       await member.timeout(duration, reason);
       await interaction.reply({ 
         content: `Muted ${user.tag} for ${durationString}.`,
         ephemeral: true 
       });
 
+      // Log to channel if configured
       if (LOG_CHANNEL_ID) {
         const logChannel = interaction.guild.channels.cache.get(LOG_CHANNEL_ID);
         if (logChannel) {
@@ -63,6 +70,7 @@ module.exports = {
                 { name: 'Reason', value: reason },
                 { name: 'User ID', value: user.id },
                 { name: 'Moderator', value: interaction.user.tag },
+                { name: 'Expires At', value: new Date(Date.now() + duration).toISOString() },
                 { name: 'Time', value: new Date().toISOString() }
               ],
               color: 0xff9900
@@ -71,27 +79,55 @@ module.exports = {
         }
       }
 
-      let data = { mutes: [] };
-      if (fs.existsSync(DATA_PATH)) {
-        data = JSON.parse(fs.readFileSync(DATA_PATH));
+      // Get current temp punishments data using the new database system
+      // Based on your commandFiles mapping, mute uses 'moderation/temp_punishments.json'
+      const tempPunishmentsKey = 'temp_punishments';
+      let data = await db.get(tempPunishmentsKey) || { 
+        temp_bans: [], 
+        temp_mutes: [], 
+        temp_timeouts: [],
+        mutes: [] // Keep both for backward compatibility
+      };
+
+      // Ensure mutes array exists (maintaining compatibility with existing structure)
+      if (!data.mutes) {
+        data.mutes = [];
       }
-      if (!data.mutes) data.mutes = [];
-      
-      data.mutes.push({
+      if (!data.temp_mutes) {
+        data.temp_mutes = [];
+      }
+
+      // Create mute record
+      const muteRecord = {
         user_id: user.id,
+        guild_id: interaction.guild.id, // Added guild_id for better tracking
         moderator_id: interaction.user.id,
         reason,
         duration: durationString,
         expires_at: new Date(Date.now() + duration).toISOString(),
-        timestamp: new Date().toISOString()
-      });
+        timestamp: new Date().toISOString(),
+        active: true
+      };
+
+      // Add to both arrays for compatibility and future structure
+      data.mutes.push(muteRecord);
+      data.temp_mutes.push(muteRecord);
+
+      // Save data using the new database system
+      await db.set(tempPunishmentsKey, data);
       
-      fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2));
+      console.log(`✅ Mute recorded for ${user.tag} (${user.id}) - expires ${muteRecord.expires_at}`);
+
     } catch (error) {
-      interaction.reply({ 
-        content: 'Failed to mute user. Error: ' + error.message,
-        ephemeral: true 
-      });
+      console.error('❌ Error in mute command:', error);
+      
+      // Try to reply if interaction hasn't been replied to yet
+      const errorMessage = 'Failed to mute user. Error: ' + error.message;
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: errorMessage, ephemeral: true });
+      } else {
+        await interaction.reply({ content: errorMessage, ephemeral: true });
+      }
     }
   }
 };
