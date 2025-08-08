@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const Database = require('../database/database'); // Adjust path as needed
+const db = require('../utils/database');
 
 function calculateLevel(messages) {
   return Math.floor(Math.sqrt(messages / 5));
