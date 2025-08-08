@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const Database = require('../database/database'); // Adjust path as needed
+const db = require('../utils/database');
 
 const WARNINGS_PER_PAGE = 5;
 
