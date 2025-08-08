@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const Database = require('../database/database'); // Adjust path as needed
+const db = require('../utils/database');
 
 const LOG_CHANNEL_ID = process.env.SERVER_LOG_CHANNEL;
 
