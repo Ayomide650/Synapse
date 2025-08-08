@@ -2,7 +2,7 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const Database = require('../utils/database'); // Adjust path as needed
 
 // Initialize database
-const db = new Database();
+const db = require('../database/database');
 
 module.exports = {
   data: new SlashCommandBuilder()
