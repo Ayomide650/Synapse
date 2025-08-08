@@ -1,6 +1,6 @@
 const { SlashCommandBuilder } = require('discord.js');
 const ms = require('ms');
-const Database = require('../database/database'); // Adjust path as needed
+const db = require('../utils/database');
 
 const LOG_CHANNEL_ID = process.env.SERVER_LOG_CHANNEL;
 
