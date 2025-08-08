@@ -1,24 +1,31 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, PermissionFlagsBits } = require('discord.js');
 const cron = require('node-cron');
+const Database = require('../utils/database'); // Adjust path as needed
 
-// Store active giveaways
-const activeGiveaways = new Map();
+// Initialize database
+const db = new Database();
 
 // Initialize cron job when module loads
 if (!global.giveawayCronInitialized) {
-  cron.schedule('* * * * *', () => {
+  cron.schedule('* * * * *', async () => {
     const now = new Date();
     
-    for (const [giveawayId, giveaway] of activeGiveaways) {
-      if (now >= giveaway.endTime) {
-        console.log(`Ending giveaway ${giveawayId} now`);
-        endGiveaway(giveawayId);
+    try {
+      const allGiveaways = await db.getAll('giveaway') || {};
+      
+      for (const [giveawayId, giveaway] of Object.entries(allGiveaways)) {
+        if (giveaway && giveaway.endTime && now >= new Date(giveaway.endTime)) {
+          console.log(`Ending giveaway ${giveawayId} now`);
+          await endGiveaway(giveawayId);
+        }
       }
+    } catch (error) {
+      console.error('Error in giveaway cron job:', error);
     }
   });
   
   global.giveawayCronInitialized = true;
-  console.log('🎉 Giveaway cron job initialized');
+  console.log('🎉 Giveaway cron job initialized with database integration');
 }
 
 // Utility function to parse time with Nigeria timezone (WAT - UTC+1)
@@ -83,12 +90,12 @@ function formatEndTime(date) {
 
 // Function to end giveaway
 async function endGiveaway(giveawayId, forceEnd = false) {
-  const giveaway = activeGiveaways.get(giveawayId);
-  if (!giveaway) return;
-  
-  const { channel, messageId, participants, winners: numWinners, prize } = giveaway;
-  
   try {
+    const giveaway = await db.get('giveaway', giveawayId);
+    if (!giveaway) return;
+    
+    const { channel, messageId, participants, winners: numWinners, prize } = giveaway;
+    
     const message = await channel.messages.fetch(messageId);
     let winnersList = [];
     
@@ -121,8 +128,21 @@ async function endGiveaway(giveawayId, forceEnd = false) {
       }
     }
     
-    activeGiveaways.delete(giveawayId);
-    console.log(`Giveaway ${giveawayId} ended at ${new Date().toISOString()}`);
+    // Log giveaway to history before removing from active
+    const historyData = {
+      ...giveaway,
+      endedAt: new Date().toISOString(),
+      winners: winnersList,
+      status: forceEnd ? 'force_ended' : 'completed',
+      finalParticipantCount: participants.length
+    };
+    
+    await db.set('giveaway_history', `${giveawayId}_${Date.now()}`, historyData);
+    
+    // Remove from active giveaways
+    await db.delete('giveaway', giveawayId);
+    
+    console.log(`Giveaway ${giveawayId} ended at ${new Date().toISOString()} and logged to database`);
   } catch (error) {
     console.error('Error ending giveaway:', error);
   }
@@ -153,6 +173,19 @@ module.exports = {
         .setName('list')
         .setDescription('List all active giveaways')
     )
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('history')
+        .setDescription('View giveaway history')
+        .addIntegerOption(option =>
+          option
+            .setName('limit')
+            .setDescription('Number of recent giveaways to show (default: 5)')
+            .setRequired(false)
+            .setMinValue(1)
+            .setMaxValue(20)
+        )
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
   async execute(interaction) {
@@ -167,6 +200,9 @@ module.exports = {
         break;
       case 'list':
         await this.handleList(interaction);
+        break;
+      case 'history':
+        await this.handleHistory(interaction);
         break;
     }
   },
@@ -189,48 +225,111 @@ module.exports = {
   },
 
   async handleEnd(interaction) {
-    const giveawayId = interaction.options.getString('giveaway_id');
-    const giveaway = activeGiveaways.get(giveawayId);
-    
-    if (!giveaway) {
+    try {
+      const giveawayId = interaction.options.getString('giveaway_id');
+      const giveaway = await db.get('giveaway', giveawayId);
+      
+      if (!giveaway) {
+        await interaction.reply({ 
+          content: '❌ No active giveaway found with that ID.',
+          ephemeral: true 
+        });
+        return;
+      }
+      
+      await endGiveaway(giveawayId, true);
       await interaction.reply({ 
-        content: '❌ No active giveaway found with that ID.',
+        content: `✅ Giveaway ${giveawayId} has been ended and logged to database.`,
         ephemeral: true 
       });
-      return;
+    } catch (error) {
+      console.error('Error in handleEnd:', error);
+      await interaction.reply({ 
+        content: '❌ Error ending giveaway. Please try again.',
+        ephemeral: true 
+      });
     }
-    
-    await endGiveaway(giveawayId, true);
-    await interaction.reply({ 
-      content: `✅ Giveaway ${giveawayId} has been ended.`,
-      ephemeral: true 
-    });
   },
 
   async handleList(interaction) {
-    if (activeGiveaways.size === 0) {
+    try {
+      const allGiveaways = await db.getAll('giveaway') || {};
+      
+      if (Object.keys(allGiveaways).length === 0) {
+        await interaction.reply({ 
+          content: 'No active giveaways found.',
+          ephemeral: true 
+        });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🎉 Active Giveaways')
+        .setColor('#0099ff')
+        .setTimestamp();
+
+      let description = '';
+      for (const [giveawayId, giveaway] of Object.entries(allGiveaways)) {
+        description += `**ID:** ${giveawayId}\n`;
+        description += `**Prize:** ${giveaway.prize}\n`;
+        description += `**Participants:** ${giveaway.participants?.length || 0}\n`;
+        description += `**Ends:** ${formatEndTime(new Date(giveaway.endTime))}\n\n`;
+      }
+
+      embed.setDescription(description);
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+    } catch (error) {
+      console.error('Error in handleList:', error);
       await interaction.reply({ 
-        content: 'No active giveaways found.',
+        content: '❌ Error fetching giveaway list. Please try again.',
         ephemeral: true 
       });
-      return;
     }
+  },
 
-    const embed = new EmbedBuilder()
-      .setTitle('🎉 Active Giveaways')
-      .setColor('#0099ff')
-      .setTimestamp();
+  async handleHistory(interaction) {
+    try {
+      const limit = interaction.options.getInteger('limit') || 5;
+      const allHistory = await db.getAll('giveaway_history') || {};
+      
+      if (Object.keys(allHistory).length === 0) {
+        await interaction.reply({ 
+          content: 'No giveaway history found.',
+          ephemeral: true 
+        });
+        return;
+      }
 
-    let description = '';
-    for (const [giveawayId, giveaway] of activeGiveaways) {
-      description += `**ID:** ${giveawayId}\n`;
-      description += `**Prize:** ${giveaway.prize}\n`;
-      description += `**Participants:** ${giveaway.participants.length}\n`;
-      description += `**Ends:** ${formatEndTime(giveaway.endTime)}\n\n`;
+      // Sort by end time and get recent ones
+      const sortedHistory = Object.entries(allHistory)
+        .sort(([,a], [,b]) => new Date(b.endedAt) - new Date(a.endedAt))
+        .slice(0, limit);
+
+      const embed = new EmbedBuilder()
+        .setTitle('📜 Giveaway History')
+        .setColor('#9932cc')
+        .setTimestamp();
+
+      let description = '';
+      for (const [historyId, giveaway] of sortedHistory) {
+        const giveawayId = historyId.split('_')[0];
+        description += `**ID:** ${giveawayId}\n`;
+        description += `**Prize:** ${giveaway.prize}\n`;
+        description += `**Status:** ${giveaway.status}\n`;
+        description += `**Participants:** ${giveaway.finalParticipantCount}\n`;
+        description += `**Winners:** ${giveaway.winners?.length || 0}\n`;
+        description += `**Ended:** ${formatEndTime(new Date(giveaway.endedAt))}\n\n`;
+      }
+
+      embed.setDescription(description);
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+    } catch (error) {
+      console.error('Error in handleHistory:', error);
+      await interaction.reply({ 
+        content: '❌ Error fetching giveaway history. Please try again.',
+        ephemeral: true 
+      });
     }
-
-    embed.setDescription(description);
-    await interaction.reply({ embeds: [embed], ephemeral: true });
   },
 
   async handleButton(interaction) {
@@ -283,7 +382,7 @@ module.exports = {
       
       if (customId.startsWith('giveaway_participate_')) {
         const giveawayId = customId.split('_')[2];
-        const giveaway = activeGiveaways.get(giveawayId);
+        const giveaway = await db.get('giveaway', giveawayId);
         
         if (!giveaway) {
           await interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
@@ -297,10 +396,13 @@ module.exports = {
         
         giveaway.participants.push(user.id);
         
+        // Update database with new participant
+        await db.set('giveaway', giveawayId, giveaway);
+        
         // Update the embed with new participant count
         const embed = new EmbedBuilder()
           .setTitle('🎉 Giveaway Active')
-          .setDescription(`**Prize:** ${giveaway.prize}\n${giveaway.description ? `**Description:** ${giveaway.description}\n` : ''}\n**Winners:** ${giveaway.winners}\n**Participants:** ${giveaway.participants.length}\n**Ends:** ${formatEndTime(giveaway.endTime)}`)
+          .setDescription(`**Prize:** ${giveaway.prize}\n${giveaway.description ? `**Description:** ${giveaway.description}\n` : ''}\n**Winners:** ${giveaway.winners}\n**Participants:** ${giveaway.participants.length}\n**Ends:** ${formatEndTime(new Date(giveaway.endTime))}`)
           .setColor('#00ff00')
           .setTimestamp();
         
@@ -323,7 +425,7 @@ module.exports = {
       
       if (customId.startsWith('giveaway_end_')) {
         const giveawayId = customId.split('_')[2];
-        const giveaway = activeGiveaways.get(giveawayId);
+        const giveaway = await db.get('giveaway', giveawayId);
         
         if (!giveaway) {
           await interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
@@ -336,7 +438,7 @@ module.exports = {
           return;
         }
         
-        // End without winners
+        // End without winners but log to history
         const embed = new EmbedBuilder()
           .setTitle('🎉 Giveaway Ended')
           .setDescription(`**Prize:** ${giveaway.prize}\n\n❌ Giveaway ended by administrator with no winners.`)
@@ -344,9 +446,20 @@ module.exports = {
           .setTimestamp();
         
         await message.edit({ embeds: [embed], components: [] });
-        activeGiveaways.delete(giveawayId);
         
-        await interaction.reply({ content: 'Giveaway ended with no winners.', ephemeral: true });
+        // Log to history
+        const historyData = {
+          ...giveaway,
+          endedAt: new Date().toISOString(),
+          winners: [],
+          status: 'admin_ended',
+          finalParticipantCount: giveaway.participants?.length || 0
+        };
+        
+        await db.set('giveaway_history', `${giveawayId}_${Date.now()}`, historyData);
+        await db.delete('giveaway', giveawayId);
+        
+        await interaction.reply({ content: 'Giveaway ended with no winners and logged to database.', ephemeral: true });
         return;
       }
     } catch (error) {
@@ -414,21 +527,29 @@ module.exports = {
       
       const giveawayMessage = await channel.send({ embeds: [embed], components: [row] });
       
-      // Store giveaway data
-      activeGiveaways.set(giveawayId, {
+      // Store giveaway data in database
+      const giveawayData = {
         messageId: giveawayMessage.id,
+        channelId: channel.id,
+        guildId: interaction.guild.id,
         channel: channel,
         prize: prize,
         description: description,
         winners: winners,
-        endTime: endTime,
-        participants: []
-      });
+        endTime: endTime.toISOString(),
+        participants: [],
+        createdBy: interaction.user.id,
+        createdAt: new Date().toISOString()
+      };
+      
+      await db.set('giveaway', giveawayId, giveawayData);
       
       await interaction.reply({ 
-        content: `🎉 Giveaway created successfully! It will end at **${formatEndTime(endTime)}**\n**Giveaway ID:** ${giveawayId}`, 
+        content: `🎉 Giveaway created successfully and saved to database!\nIt will end at **${formatEndTime(endTime)}**\n**Giveaway ID:** ${giveawayId}`, 
         ephemeral: true 
       });
+      
+      console.log(`Giveaway ${giveawayId} created and saved to database`);
       
     } catch (error) {
       console.error('Error in giveaway handleModal:', error);
